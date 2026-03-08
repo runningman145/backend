@@ -1,3 +1,4 @@
+import uuid
 from flask import Blueprint, jsonify, request
 from .db import get_db
 
@@ -15,16 +16,17 @@ def create_camera():
     if missing:
         return jsonify({'error': f'Missing required fields: {", ".join(missing)}'}), 400
 
+    camera_id = str(uuid.uuid4())
     db = get_db()
-    cursor = db.execute(
-        'INSERT INTO cameras (name, latitude, longitude) VALUES (?, ?, ?)',
-        (data['name'], data['latitude'], data['longitude'])
+    db.execute(
+        'INSERT INTO cameras (id, name, latitude, longitude) VALUES (?, ?, ?, ?)',
+        (camera_id, data['name'], data['latitude'], data['longitude'])
     )
     db.commit()
 
     camera = db.execute(
         'SELECT id, name, latitude, longitude, created_at FROM cameras WHERE id = ?',
-        (cursor.lastrowid,)
+        (camera_id,)
     ).fetchone()
 
     return jsonify(_serialize(camera)), 201
@@ -41,14 +43,14 @@ def list_cameras():
     return jsonify([_serialize(row) for row in rows])
 
 
-@bp.route('/<int:camera_id>', methods=['GET'])
+@bp.route('/<camera_id>', methods=['GET'])
 def get_camera(camera_id):
     """Return a single camera by ID."""
     camera = _get_or_404(camera_id)
     return jsonify(_serialize(camera))
 
 
-@bp.route('/<int:camera_id>', methods=['PUT'])
+@bp.route('/<camera_id>', methods=['PUT'])
 def update_camera(camera_id):
     """Update name, latitude, and/or longitude of a camera."""
     _get_or_404(camera_id)
@@ -78,7 +80,7 @@ def update_camera(camera_id):
     return jsonify(_serialize(updated))
 
 
-@bp.route('/<int:camera_id>', methods=['DELETE'])
+@bp.route('/<camera_id>', methods=['DELETE'])
 def delete_camera(camera_id):
     """Delete a camera and its related detections."""
     _get_or_404(camera_id)
