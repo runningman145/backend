@@ -18,3 +18,15 @@ CREATE TABLE detections (
     captured_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (camera_id) REFERENCES cameras(id)
 );
+
+-- table for user of the system
+CREATE TABLE user (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL UNIQUE,
+    full_name TEXT NOT NULL,
+    username TEXT NOT NULL UNIQUE,
+    hashed_password TEXT NOT NULL,
+    changed_password_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    role TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
