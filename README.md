@@ -30,7 +30,7 @@ The system enables:
 
 1. **Clone the repository**
 ```bash
-
+git clone https://github.com/runningman145/backend
 ```
 
 2. **Create a virtual environment**
