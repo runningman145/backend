@@ -1,7 +1,13 @@
 import os
 from datetime import datetime
+from io import BytesIO
 from werkzeug.utils import secure_filename
-from flask import Blueprint, jsonify, request, current_app
+from flask import Blueprint, jsonify, request, current_app, send_file
+from reportlab.lib.pagesizes import letter
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
 from .db import get_db
 
 bp = Blueprint('tracking', __name__, url_prefix='/tracking')
@@ -189,3 +195,110 @@ def download_media(filename):
         'path': filepath,
         'size': os.path.getsize(filepath)
     })
+
+
+@bp.route('/detections/<int:detection_id>/export-pdf', methods=['GET'])
+def export_detection_pdf(detection_id):
+    """Export a detection to PDF format."""
+    db = get_db()
+    
+    detection = db.execute(
+        '''
+        SELECT
+            d.id,
+            d.captured_at,
+            c.id   AS camera_id,
+            c.name AS camera_name,
+            c.latitude,
+            c.longitude,
+            c.status
+        FROM detections d
+        JOIN cameras c ON d.camera_id = c.id
+        WHERE d.id = ?
+        ''',
+        (detection_id,)
+    ).fetchone()
+    
+    if detection is None:
+        return jsonify({'error': f'Detection {detection_id} not found'}), 404
+    
+    # Create PDF in memory
+    pdf_buffer = BytesIO()
+    doc = SimpleDocTemplate(pdf_buffer, pagesize=letter)
+    elements = []
+    
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=24,
+        textColor=colors.HexColor('#1f4788'),
+        spaceAfter=30,
+    )
+    
+    heading_style = ParagraphStyle(
+        'CustomHeading',
+        parent=styles['Heading2'],
+        fontSize=14,
+        textColor=colors.HexColor('#2d5aa6'),
+        spaceAfter=12,
+    )
+    
+    # Title
+    elements.append(Paragraph('Vehicle Detection Report', title_style))
+    elements.append(Spacer(1, 0.3 * inch))
+    
+    # Detection Info Section
+    elements.append(Paragraph('Detection Information', heading_style))
+    detection_data = [
+        ['Detection ID:', str(detection['id'])],
+        ['Captured At:', detection['captured_at'].isoformat()],
+    ]
+    
+    detection_table = Table(detection_data, colWidths=[2 * inch, 3.5 * inch])
+    detection_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (0, -1), colors.HexColor('#e8f0f8')),
+        ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 10),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
+        ('TOPPADDING', (0, 0), (-1, -1), 12),
+        ('GRID', (0, 0), (-1, -1), 1, colors.grey),
+    ]))
+    elements.append(detection_table)
+    elements.append(Spacer(1, 0.3 * inch))
+    
+    # Camera Info Section
+    elements.append(Paragraph('Camera Information', heading_style))
+    camera_data = [
+        ['Camera ID:', detection['camera_id']],
+        ['Camera Name:', detection['camera_name']],
+        ['Status:', detection['status']],
+        ['Latitude:', detection['latitude']],
+        ['Longitude:', detection['longitude']],
+    ]
+    
+    camera_table = Table(camera_data, colWidths=[2 * inch, 3.5 * inch])
+    camera_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (0, -1), colors.HexColor('#e8f0f8')),
+        ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 10),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
+        ('TOPPADDING', (0, 0), (-1, -1), 12),
+        ('GRID', (0, 0), (-1, -1), 1, colors.grey),
+    ]))
+    elements.append(camera_table)
+    
+    # Build PDF
+    doc.build(elements)
+    pdf_buffer.seek(0)
+    
+    return send_file(
+        pdf_buffer,
+        mimetype='application/pdf',
+        as_attachment=True,
+        download_name=f'detection_{detection_id}.pdf'
+    )
