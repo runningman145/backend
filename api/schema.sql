@@ -8,6 +8,7 @@ CREATE TABLE cameras (
     name TEXT NOT NULL,
     latitude TEXT NOT NULL,
     longitude TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'offline' CHECK(status IN ('online', 'offline', 'inactive')),
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

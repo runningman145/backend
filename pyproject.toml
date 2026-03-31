@@ -1,0 +1,40 @@
+[project]
+name = "backend-api"
+version = "1.0.0"
+description = "Backend API for vehicle detection and tracking system with camera management."
+authors = [
+    {name = "Wahid", email = "wahid@example.com"}
+]
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+keywords = ["flask", "api", "vehicle-detection", "camera-tracking"]
+
+dependencies = [
+    "flask>=2.3.0",
+    "PyJWT>=2.6.0",
+    "python-dotenv>=0.21.0",
+    "werkzeug>=2.3.0",
+]
+
+[optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+]
+
+[build-system]
+requires = ["flit_core<4"]
+build-backend = "flit_core.buildapi"
+
+[tool.black]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+
+[urls]
+Homepage = "https://github.com/yourusername/backend-api"

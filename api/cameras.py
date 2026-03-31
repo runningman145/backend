@@ -17,15 +17,22 @@ def create_camera():
         return jsonify({'error': f'Missing required fields: {", ".join(missing)}'}), 400
 
     camera_id = str(uuid.uuid4())
+    status = data.get('status', 'offline')
+    
+    # Validate status value
+    valid_statuses = {'online', 'offline', 'inactive'}
+    if status not in valid_statuses:
+        return jsonify({'error': f'Status must be one of: {', '.join(valid_statuses)}'}), 400
+    
     db = get_db()
     db.execute(
-        'INSERT INTO cameras (id, name, latitude, longitude) VALUES (?, ?, ?, ?)',
-        (camera_id, data['name'], data['latitude'], data['longitude'])
+        'INSERT INTO cameras (id, name, latitude, longitude, status) VALUES (?, ?, ?, ?, ?)',
+        (camera_id, data['name'], data['latitude'], data['longitude'], status)
     )
     db.commit()
 
     camera = db.execute(
-        'SELECT id, name, latitude, longitude, created_at FROM cameras WHERE id = ?',
+        'SELECT id, name, latitude, longitude, status, created_at FROM cameras WHERE id = ?',
         (camera_id,)
     ).fetchone()
 
@@ -37,7 +44,7 @@ def list_cameras():
     """Return all cameras."""
     db = get_db()
     rows = db.execute(
-        'SELECT id, name, latitude, longitude, created_at FROM cameras ORDER BY created_at DESC'
+        'SELECT id, name, latitude, longitude, status, created_at FROM cameras ORDER BY created_at DESC'
     ).fetchall()
 
     return jsonify([_serialize(row) for row in rows])
@@ -52,18 +59,24 @@ def get_camera(camera_id):
 
 @bp.route('/<camera_id>', methods=['PUT'])
 def update_camera(camera_id):
-    """Update name, latitude, and/or longitude of a camera."""
+    """Update name, latitude, longitude, and/or status of a camera."""
     _get_or_404(camera_id)
 
     data = request.get_json()
     if not data:
         return jsonify({'error': 'Request body is required'}), 400
 
-    allowed = {'name', 'latitude', 'longitude'}
+    allowed = {'name', 'latitude', 'longitude', 'status'}
     fields = {k: v for k, v in data.items() if k in allowed}
 
     if not fields:
         return jsonify({'error': f'Provide at least one of: {", ".join(allowed)}'}), 400
+    
+    # Validate status if provided
+    if 'status' in fields:
+        valid_statuses = {'online', 'offline', 'inactive'}
+        if fields['status'] not in valid_statuses:
+            return jsonify({'error': f'Status must be one of: {", ".join(valid_statuses)}'}), 400
 
     set_clause = ', '.join(f'{col} = ?' for col in fields)
     values = list(fields.values()) + [camera_id]
@@ -73,7 +86,7 @@ def update_camera(camera_id):
     db.commit()
 
     updated = db.execute(
-        'SELECT id, name, latitude, longitude, created_at FROM cameras WHERE id = ?',
+        'SELECT id, name, latitude, longitude, status, created_at FROM cameras WHERE id = ?',
         (camera_id,)
     ).fetchone()
 
@@ -98,7 +111,7 @@ def delete_camera(camera_id):
 def _get_or_404(camera_id):
     db = get_db()
     row = db.execute(
-        'SELECT id, name, latitude, longitude, created_at FROM cameras WHERE id = ?',
+        'SELECT id, name, latitude, longitude, status, created_at FROM cameras WHERE id = ?',
         (camera_id,)
     ).fetchone()
     if row is None:
@@ -113,5 +126,6 @@ def _serialize(row):
         'name': row['name'],
         'latitude': row['latitude'],
         'longitude': row['longitude'],
+        'status': row['status'],
         'created_at': row['created_at'].isoformat(),
     }
