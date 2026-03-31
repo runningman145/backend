@@ -1,5 +1,6 @@
 -- a table for cameras in the system
 
+DROP TABLE IF EXISTS detection_matches;
 DROP TABLE IF EXISTS detections;
 DROP TABLE IF EXISTS cameras;
 
@@ -20,9 +21,19 @@ CREATE TABLE detections (
     FOREIGN KEY (camera_id) REFERENCES cameras(id)
 );
 
--- table for user of the system
-CREATE TABLE user (
+-- a table for ReID matching results
+CREATE TABLE detection_matches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    detection_id INTEGER NOT NULL,
+    similarity_score REAL NOT NULL,
+    timestamp REAL NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (detection_id) REFERENCES detections(id)
+);
+
+-- table for user of the system
+CREATE TABLE users (
+    id TEXT PRIMARY KEY,
     email TEXT NOT NULL UNIQUE,
     full_name TEXT NOT NULL,
     username TEXT NOT NULL UNIQUE,
