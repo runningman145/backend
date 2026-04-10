@@ -166,7 +166,7 @@ backend/
 │   ├── tracking.py           # Detection and upload endpoints
 │   ├── health.py             # Health check endpoints
 │   ├── db.py                 # Database connection
-│   ├── model.py              # Data models
+│   ├── model.py              # Pytorch model
 │   ├── schema.sql            # Database schema
 │   └── __pycache__/
 ├── instance/
