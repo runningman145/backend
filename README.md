@@ -72,34 +72,6 @@ The API will be available at `http://localhost:5000`
 
 ## API Endpoints
 
-### Authentication
-
-- **POST** `/auth/register` - Register a new user
-  ```json
-  {
-    "username": "john_doe",
-    "email": "john@example.com",
-    "password": "secure_password"
-  }
-  ```
-
-- **POST** `/auth/login` - Login and get JWT token
-  ```json
-  {
-    "email": "john@example.com",
-    "password": "secure_password"
-  }
-  ```
-  Response:
-  ```json
-  {
-    "message": "Login successful",
-    "token": "eyJ0eXAiOiJKV1QiLCJhbGc...",
-    "user_id": "550e8400-e29b-41d4-a716-446655440000"
-  }
-  ```
-
-- **POST** `/auth/logout` - Logout (requires authentication)
 
 ### Cameras
 
@@ -145,15 +117,6 @@ curl -X POST http://localhost:5000/tracking/upload \
 - **GET** `/health/ping` - Simple ping
 - **GET** `/health/status` - Detailed status with database stats
 
-## Authentication
-
-All endpoints (except `/auth/register` and `/auth/login`) require a valid JWT token.
-
-Include the token in your requests:
-```bash
-curl -X GET http://localhost:5000/cameras \
-  -H "Authorization: Bearer your_jwt_token_here"
-```
 
 ## Project Structure
 
