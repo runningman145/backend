@@ -6,12 +6,15 @@ import base64
 import cv2
 import numpy as np
 import torch
+import os
 from io import BytesIO
 from flask import Blueprint, jsonify, request, current_app
 from ultralytics import YOLO
 from torchvision import transforms
 from torchvision.models import resnet50
+from werkzeug.utils import secure_filename
 from .db import get_db
+from .jobs import create_job, get_job_status
 
 bp = Blueprint('model', __name__, url_prefix='/model')
 
@@ -114,71 +117,127 @@ def model_status():
 @bp.route('/process-video', methods=['POST'])
 def process_video():
     """
-    Process video to find vehicle matches using ReID.
+    Queue a video for background processing.
     
-    Request body:
+    Request body (JSON):
     {
-        'video_data': '<base64-encoded video OR uploaded file>',
-        'query_image': '<base64-encoded query image OR uploaded file>',
+        'video_data': '<base64-encoded video>',  // OR upload as multipart file 'video'
+        'query_image': '<base64-encoded query image>',  // OR upload as multipart file 'query_image'
+        'camera_id': '<camera ID>',
         'detection_id': '<optional detection_id to associate results>',
         'threshold': <optional similarity threshold, default 40>,
         'frame_skip': <optional frames to skip, default 15>
     }
+    
+    Returns:
+    {
+        'job_id': '<UUID of the queued job>',
+        'status': 'queued',
+        'message': 'Video queued for processing'
+    }
     """
     try:
-        models = _get_models()
-        yolo_model = models['yolo']
-        reid_model = models['reid']
-        transform_func = models['transform']
-        device = models['device']
+        # Validate camera_id
+        camera_id = request.json.get('camera_id') if request.json else None
+        if not camera_id:
+            return jsonify({'error': 'camera_id is required'}), 400
         
-        # Get threshold and frame_skip from request
-        threshold = request.json.get('threshold', MODEL_CONFIG['MATCH_THRESHOLD_PERCENT'])
-        frame_skip = request.json.get('frame_skip', MODEL_CONFIG['FRAME_SKIP'])
-        detection_id = request.json.get('detection_id')
+        # Verify camera exists
+        db = get_db()
+        camera = db.execute('SELECT id FROM cameras WHERE id = ?', (camera_id,)).fetchone()
+        if camera is None:
+            return jsonify({'error': f'Camera {camera_id} not found'}), 404
         
-        # Extract video
+        # Load video
         video_data = _load_video_from_request()
         if not video_data:
             return jsonify({'error': 'Video data required (video_data or uploaded file)'}), 400
         
-        # Extract query image
+        # Load query image
         query_image = _load_image_from_request('query_image')
         if query_image is None:
             return jsonify({'error': 'Query image required'}), 400
         
-        query_image_rgb = cv2.cvtColor(query_image, cv2.COLOR_BGR2RGB)
-        query_embedding = extract_embedding(query_image_rgb, reid_model, transform_func, device)
+        # Save files to disk
+        upload_folder = os.path.join(current_app.instance_path, 'uploads')
+        os.makedirs(upload_folder, exist_ok=True)
         
-        # Process video
-        results = _process_video_data(
-            video_data, yolo_model, reid_model, transform_func, device,
-            query_embedding, threshold, frame_skip
+        import uuid
+        video_filename = f"video_{uuid.uuid4()}.mp4"
+        query_image_filename = f"query_{uuid.uuid4()}.jpg"
+        
+        video_path = os.path.join(upload_folder, video_filename)
+        query_image_path = os.path.join(upload_folder, query_image_filename)
+        
+        with open(video_path, 'wb') as f:
+            f.write(video_data)
+        
+        cv2.imwrite(query_image_path, query_image)
+        
+        # Create detection record
+        detection_id = None
+        if request.json.get('detection_id'):
+            detection_id = request.json.get('detection_id')
+        else:
+            cursor = db.execute(
+                'INSERT INTO detections (camera_id) VALUES (?)',
+                (camera_id,)
+            )
+            db.commit()
+            detection_id = cursor.lastrowid
+        
+        # Get processing parameters
+        threshold = request.json.get('threshold', MODEL_CONFIG['MATCH_THRESHOLD_PERCENT']) if request.json else MODEL_CONFIG['MATCH_THRESHOLD_PERCENT']
+        frame_skip = request.json.get('frame_skip', MODEL_CONFIG['FRAME_SKIP']) if request.json else MODEL_CONFIG['FRAME_SKIP']
+        
+        # Queue job
+        job_id = create_job(
+            camera_id=camera_id,
+            detection_id=detection_id,
+            video_filename=video_filename,
+            query_image_filename=query_image_filename,
+            threshold=threshold,
+            frame_skip=frame_skip
         )
         
-        if isinstance(results, tuple):  # Error response
-            return results
-        
-        # Store results in database if detection_id provided
-        if detection_id:
-            db = get_db()
-            for result in results:
-                db.execute(
-                    'INSERT INTO detection_matches (detection_id, similarity_score, timestamp) VALUES (?, ?, ?)',
-                    (detection_id, result['match_percent'], result['time'])
-                )
-            db.commit()
-        
         return jsonify({
-            'message': 'Video processed successfully',
-            'matches': results,
-            'total_matches': len(results),
+            'job_id': job_id,
+            'status': 'queued',
+            'message': 'Video queued for processing',
             'detection_id': detection_id,
-        }), 200
+        }), 202
     
     except Exception as e:
-        current_app.logger.error(f"Error processing video: {str(e)}")
-        return jsonify({'error': f'Failed to process video: {str(e)}'}), 500
+        current_app.logger.error(f"Error queuing video: {str(e)}")
+        return jsonify({'error': f'Failed to queue video: {str(e)}'}), 500
+
+
+@bp.route('/job-status/<job_id>', methods=['GET'])
+def job_status(job_id):
+    """
+    Get the status of a queued video processing job.
+    
+    Returns:
+    {
+        'id': '<job_id>',
+        'status': 'pending|processing|completed|failed',
+        'created_at': '<timestamp>',
+        'started_at': '<timestamp or null>',
+        'completed_at': '<timestamp or null>',
+        'results': { ... } // only if completed
+        'error': '<error message>' // only if failed
+    }
+    """
+    try:
+        job = get_job_status(job_id)
+        if job is None:
+            return jsonify({'error': 'Job not found'}), 404
+        
+        return jsonify(job), 200
+    
+    except Exception as e:
+        current_app.logger.error(f"Error getting job status: {str(e)}")
+        return jsonify({'error': f'Failed to get job status: {str(e)}'}), 500
 
 
 def _load_video_from_request():
@@ -223,8 +282,13 @@ def _load_image_from_request(field_name):
 
 
 def _process_video_data(video_data, yolo_model, reid_model, transform_func, device,
-                       query_embedding, threshold, frame_skip):
-    """Process video bytes and return matches."""
+                       query_embedding, threshold, frame_skip, detection_id=None, camera_id=None):
+    """
+    Process video bytes and return matches.
+    If detection_id and camera_id provided, also stores vehicle detections for cross-camera tracking.
+    """
+    from . import vehicle_tracking
+    
     # Save video to temp location
     import tempfile
     with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp:
@@ -294,11 +358,35 @@ def _process_video_data(video_data, yolo_model, reid_model, transform_func, devi
                     
                     if similarity > threshold:
                         timestamp = frame_id / fps if fps > 0 else 0
-                        results.append({
+                        
+                        result = {
                             'time': round(timestamp, 2),
                             'match_percent': round(similarity, 2),
                             'box': {'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2},
-                        })
+                        }
+                        
+                        # Store vehicle detection for cross-camera tracking
+                        if detection_id and camera_id:
+                            try:
+                                vehicle_det_id = vehicle_tracking.store_vehicle_detection(
+                                    detection_id=detection_id,
+                                    camera_id=camera_id,
+                                    timestamp=timestamp,
+                                    box=result['box'],
+                                    embedding=vehicle_embedding,
+                                    match_score=similarity
+                                )
+                                
+                                # Correlate with vehicles from other cameras
+                                track_id = vehicle_tracking.correlate_vehicle_detections(
+                                    vehicle_det_id, camera_id, timestamp, vehicle_embedding
+                                )
+                                
+                                result['track_id'] = track_id
+                            except Exception as e:
+                                current_app.logger.warning(f"Error storing vehicle detection: {str(e)}")
+                        
+                        results.append(result)
         finally:
             video.release()
         
