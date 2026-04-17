@@ -1,6 +1,6 @@
 # Backend API - Vehicle Detection & Tracking System
 
-This is the backend API for a vehicle detection and tracking system using camera networks. The project uses Flask to provide REST endpoints for managing cameras, detections, and user authentication with JWT tokens.
+This is the backend API for a vehicle detection and tracking system using camera networks. The project uses Flask to provide REST endpoints for managing cameras, detections.
 
 ## Project Overview
 
