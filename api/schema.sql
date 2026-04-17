@@ -106,15 +106,3 @@ CREATE TABLE videos (
 
 -- index for faster queries by camera and date
 CREATE INDEX idx_videos_camera_captured ON videos(camera_id, captured_at);
-
--- table for user of the system
-CREATE TABLE users (
-    id TEXT PRIMARY KEY,
-    email TEXT NOT NULL UNIQUE,
-    full_name TEXT NOT NULL,
-    username TEXT NOT NULL UNIQUE,
-    hashed_password TEXT NOT NULL,
-    changed_password_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    role TEXT NOT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-)

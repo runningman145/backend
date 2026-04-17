@@ -1,13 +1,13 @@
 """
-Cross-camera vehicle tracking system.
-Correlates vehicle detections across cameras to build tracks of vehicle movements.
+Cross-camera vehicle correlation.
+Correlates vehicle detections across cameras to build tracks.
 """
 import json
 import numpy as np
 import uuid
-from datetime import datetime, timedelta
 from flask import current_app
-from .db import get_db
+from ..db import get_db
+from ..ml.reid import cosine_similarity
 
 
 # Configuration for cross-camera correlation
@@ -17,44 +17,6 @@ TRACKING_CONFIG = {
     'MAX_DISTANCE_KM': 5,  # Max distance between cameras for correlation
     'SPATIAL_FILTER_ENABLED': True,  # Use camera location to help correlation
 }
-
-
-def store_vehicle_detection(detection_id, camera_id, timestamp, box, embedding, match_score=None):
-    """
-    Store a detected vehicle with its embedding for tracking.
-    
-    Args:
-        detection_id: ID of the parent detection record
-        camera_id: Camera where vehicle was detected
-        timestamp: Frame timestamp in seconds
-        box: Dict with keys x1, y1, x2, y2 (bbox coordinates)
-        embedding: numpy array of ReID embedding
-        match_score: Optional similarity score to query image
-    
-    Returns:
-        vehicle_detection_id (integer)
-    """
-    try:
-        # Serialize embedding as JSON
-        embedding_bytes = json.dumps(embedding.tolist()).encode('utf-8')
-        
-        box_area = (box['x2'] - box['x1']) * (box['y2'] - box['y1'])
-        
-        db = get_db()
-        cursor = db.execute(
-            '''INSERT INTO vehicle_detections 
-               (detection_id, camera_id, timestamp, box_x1, box_y1, box_x2, box_y2, box_area, embedding, match_score)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-            (detection_id, camera_id, timestamp,
-             box['x1'], box['y1'], box['x2'], box['y2'],
-             box_area, embedding_bytes, match_score)
-        )
-        db.commit()
-        
-        return cursor.lastrowid
-    except Exception as e:
-        current_app.logger.error(f"Error storing vehicle detection: {str(e)}")
-        raise
 
 
 def correlate_vehicle_detections(new_vehicle_id, camera_id, timestamp, embedding):
@@ -99,9 +61,7 @@ def correlate_vehicle_detections(new_vehicle_id, camera_id, timestamp, embedding
             other_embedding = np.array(json.loads(detection['embedding']))
             
             # Calculate cosine similarity
-            similarity = np.dot(embedding, other_embedding) / (
-                np.linalg.norm(embedding) * np.linalg.norm(other_embedding) + 1e-6
-            )
+            similarity = cosine_similarity(embedding, other_embedding)
             
             # Check spatial proximity if enabled
             if TRACKING_CONFIG['SPATIAL_FILTER_ENABLED']:
@@ -141,136 +101,6 @@ def correlate_vehicle_detections(new_vehicle_id, camera_id, timestamp, embedding
         track_id = str(uuid.uuid4())
         _create_single_vehicle_track(track_id, new_vehicle_id, camera_id, timestamp)
         return track_id
-
-
-def get_vehicle_track(track_id):
-    """
-    Get all detections in a track with camera info.
-    
-    Returns:
-        List of detections with camera names and coordinates
-    """
-    try:
-        db = get_db()
-        track = db.execute(
-            '''SELECT vt.id, vt.first_seen, vt.last_seen, COUNT(td.id) as detection_count
-               FROM vehicle_tracks vt
-               LEFT JOIN track_detections td ON vt.id = td.track_id
-               WHERE vt.id = ?
-               GROUP BY vt.id''',
-            (track_id,)
-        ).fetchone()
-        
-        if not track:
-            return None
-        
-        detections = db.execute(
-            '''SELECT vd.id, vd.timestamp, vd.match_score, vd.box_x1, vd.box_y1, vd.box_x2, vd.box_y2, 
-                      c.id as camera_id, c.name as camera_name, c.latitude, c.longitude, d.captured_at
-               FROM track_detections td
-               JOIN vehicle_detections vd ON td.vehicle_detection_id = vd.id
-               JOIN cameras c ON vd.camera_id = c.id
-               JOIN detections d ON vd.detection_id = d.id
-               WHERE td.track_id = ?
-               ORDER BY vd.timestamp ASC''',
-            (track_id,)
-        ).fetchall()
-        
-        return {
-            'track_id': track['id'],
-            'first_seen': track['first_seen'],
-            'last_seen': track['last_seen'],
-            'detection_count': track['detection_count'],
-            'detections': [
-                {
-                    'detection_id': d['id'],
-                    'timestamp': d['timestamp'],
-                    'match_score': d['match_score'],
-                    'bbox': {'x1': d['box_x1'], 'y1': d['box_y1'], 'x2': d['box_x2'], 'y2': d['box_y2']},
-                    'camera': {
-                        'id': d['camera_id'],
-                        'name': d['camera_name'],
-                        'latitude': d['latitude'],
-                        'longitude': d['longitude'],
-                    },
-                    'captured_at': d['captured_at'],
-                }
-                for d in detections
-            ]
-        }
-    
-    except Exception as e:
-        current_app.logger.error(f"Error getting vehicle track: {str(e)}")
-        return None
-
-
-def get_all_tracks(limit=100, offset=0):
-    """
-    Get all vehicle tracks with summary info.
-    """
-    try:
-        db = get_db()
-        tracks = db.execute(
-            '''SELECT vt.id, vt.first_seen, vt.last_seen, 
-                      COUNT(DISTINCT td.vehicle_detection_id) as detection_count,
-                      COUNT(DISTINCT vd.camera_id) as camera_count
-               FROM vehicle_tracks vt
-               LEFT JOIN track_detections td ON vt.id = td.track_id
-               LEFT JOIN vehicle_detections vd ON td.vehicle_detection_id = vd.id
-               GROUP BY vt.id
-               ORDER BY vt.last_seen DESC
-               LIMIT ? OFFSET ?''',
-            (limit, offset)
-        ).fetchall()
-        
-        return [
-            {
-                'track_id': t['id'],
-                'first_seen': t['first_seen'],
-                'last_seen': t['last_seen'],
-                'detection_count': t['detection_count'],
-                'camera_count': t['camera_count'],
-            }
-            for t in tracks
-        ]
-    
-    except Exception as e:
-        current_app.logger.error(f"Error getting tracks: {str(e)}")
-        return []
-
-
-def get_tracks_for_camera(camera_id, limit=50):
-    """
-    Get all vehicle tracks that include detections from a specific camera.
-    """
-    try:
-        db = get_db()
-        tracks = db.execute(
-            '''SELECT DISTINCT vt.id, vt.first_seen, vt.last_seen,
-                      COUNT(DISTINCT td.vehicle_detection_id) as detection_count
-               FROM vehicle_tracks vt
-               JOIN track_detections td ON vt.id = td.track_id
-               JOIN vehicle_detections vd ON td.vehicle_detection_id = vd.id
-               WHERE vd.camera_id = ?
-               GROUP BY vt.id
-               ORDER BY vt.last_seen DESC
-               LIMIT ?''',
-            (camera_id, limit)
-        ).fetchall()
-        
-        return [
-            {
-                'track_id': t['id'],
-                'first_seen': t['first_seen'],
-                'last_seen': t['last_seen'],
-                'detection_count': t['detection_count'],
-            }
-            for t in tracks
-        ]
-    
-    except Exception as e:
-        current_app.logger.error(f"Error getting camera tracks: {str(e)}")
-        return []
 
 
 def _add_vehicle_to_track(vehicle_detection_id, track_id):

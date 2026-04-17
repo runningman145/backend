@@ -1,6 +1,9 @@
+"""
+Health check endpoints.
+Provides liveness, readiness, and status checks.
+"""
 from flask import Blueprint, jsonify
-from .db import get_db
-import os
+from ..db import get_db
 
 bp = Blueprint('health', __name__, url_prefix='/health')
 
@@ -52,7 +55,6 @@ def detailed_status():
         # Get database stats
         cameras_count = db.execute('SELECT COUNT(*) as count FROM cameras').fetchone()['count']
         detections_count = db.execute('SELECT COUNT(*) as count FROM detections').fetchone()['count']
-        users_count = db.execute('SELECT COUNT(*) as count FROM users').fetchone()['count']
         
         # Check database connectivity
         db.execute('SELECT 1').fetchone()
@@ -66,7 +68,6 @@ def detailed_status():
                 'stats': {
                     'cameras': cameras_count,
                     'detections': detections_count,
-                    'users': users_count
                 }
             }
         }), 200

@@ -1,6 +1,10 @@
+"""
+Camera management endpoints.
+Handles CRUD operations for cameras.
+"""
 import uuid
 from flask import Blueprint, jsonify, request
-from .db import get_db
+from ..db import get_db
 
 bp = Blueprint('cameras', __name__, url_prefix='/cameras')
 
@@ -22,7 +26,7 @@ def create_camera():
     # Validate status value
     valid_statuses = {'online', 'offline', 'inactive'}
     if status not in valid_statuses:
-        return jsonify({'error': f'Status must be one of: {', '.join(valid_statuses)}'}), 400
+        return jsonify({'error': f'Status must be one of: {", ".join(valid_statuses)}'}), 400
     
     db = get_db()
     db.execute(
@@ -109,6 +113,7 @@ def delete_camera(camera_id):
 # ---------- helpers ----------
 
 def _get_or_404(camera_id):
+    """Get camera by ID or abort with 404."""
     db = get_db()
     row = db.execute(
         'SELECT id, name, latitude, longitude, status, created_at FROM cameras WHERE id = ?',
@@ -121,6 +126,7 @@ def _get_or_404(camera_id):
 
 
 def _serialize(row):
+    """Serialize camera database row to JSON-compatible dict."""
     return {
         'id': row['id'],
         'name': row['name'],

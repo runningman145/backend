@@ -56,7 +56,7 @@ echo 'SECRET_KEY=your_super_secret_key_change_in_production' > .env
 
 6. **Initialize the database**
 ```bash
-flask --app api.db init-db
+flask --app api init-db
 ```
 
 ## Running the Application

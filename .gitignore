@@ -1,6 +1,19 @@
 .venv
 .env
 
+.pth
+
+tests/
+
+_deprecated/
+REFACTORING_SUMMARY.md
+yolov8n.pt
+reid_model.pth
+
+pytest.ini
+conftest.py
+
+
 *.pyc
 __pycache__/
 
