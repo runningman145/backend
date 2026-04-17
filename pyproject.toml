@@ -1,5 +1,5 @@
 [project]
-name = "backend-api"
+name = "backend"
 version = "1.0.0"
 description = "Backend API for vehicle detection and tracking system with camera management."
 authors = [
@@ -44,4 +44,4 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 
 [urls]
-Homepage = "https://github.com/yourusername/backend-api"
+Homepage = "https://github.com/runnningman145/backend"
