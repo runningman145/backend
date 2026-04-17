@@ -3,3 +3,7 @@ torchvision
 ultralytics
 opencv-python
 numpy
+flask
+flask-cors
+werkzeug
+reportlab
