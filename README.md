@@ -5,7 +5,7 @@ This is the backend API for a vehicle detection and tracking system using camera
 ## Project Overview
 
 The system enables:
-- User registration and authentication with JWT
+<!-- - User registration and authentication with JWT -->
 - Camera management (create, read, update, delete)
 - Vehicle detection logging from ML models
 - Media uploads (pictures and videos)
@@ -15,7 +15,7 @@ The system enables:
 ## Tech Stack
 
 - **Framework**: Flask 2.3+
-- **Authentication**: JWT (PyJWT)
+<!-- - **Authentication**: JWT (PyJWT) -->
 - **Database**: SQLite
 - **Environment**: Python 3.8+
 - **File Upload**: Werkzeug
@@ -44,28 +44,20 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 pip install -e .
 ```
 
-4. **Install development dependencies (optional)**
-```bash
-pip install -e ".[dev]"
-```
-
-5. **Create `.env` file with secret key**
+4. **Create `.env` file with secret key**
 ```bash
 echo 'SECRET_KEY=your_super_secret_key_change_in_production' > .env
 ```
 
-6. **Initialize the database**
+5. **Initialize the database**
 ```bash
 flask --app api init-db
 ```
 
 ## Running the Application
-
-### Development Mode
+Run with debug information in development mode
 ```bash
-export FLASK_APP=api
-export FLASK_ENV=development
-flask run
+flask --app api run --debug
 ```
 
 The API will be available at `http://localhost:5000`
@@ -118,7 +110,7 @@ curl -X POST http://localhost:5000/tracking/upload \
 - **GET** `/health/status` - Detailed status with database stats
 
 
-## Project Structure
+<!-- ## Project Structure
 
 ```
 backend/
@@ -138,15 +130,15 @@ backend/
 ├── .gitignore
 ├── pyproject.toml            # Project metadata and dependencies
 └── README.md
-```
+``` -->
 
-## Database
+<!-- ## Database
 
 The project uses SQLite with three main tables:
 
 - **users** - User accounts
 - **cameras** - Camera devices with location and status
-- **detections** - Vehicle detections recorded by ML models
+- **detections** - Vehicle detections recorded by ML models -->
 
 Initialize database:
 ```bash
@@ -160,7 +152,7 @@ Create a `.env` file in the project root:
 ```env
 SECRET_KEY=your_production_secret_key_here
 FLASK_ENV=production
-FLASK_DEBUG=False
+FLASK_DEBUG=True
 ```
 
 ## Error Handling
