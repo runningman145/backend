@@ -39,17 +39,17 @@ python -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 ```
 
-3. **Install dependencies**
+<!-- 3. **Install dependencies**
 ```bash
 pip install -e .
-```
+``` -->
 
-4. **Create `.env` file with secret key**
+3. **Create `.env` file with secret key**
 ```bash
 echo 'SECRET_KEY=your_super_secret_key_change_in_production' > .env
 ```
 
-5. **Initialize the database**
+4. **Initialize the database**
 ```bash
 flask --app api init-db
 ```
