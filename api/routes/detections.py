@@ -183,7 +183,7 @@ def get_detection(detection_id):
 @bp.route('', methods=['POST'])
 def add_detection():
     """Record a new car detection submitted by the ML model."""
-    data = request.get_json()
+    data = request.get_json(force=True, silent=True)
 
     if not data or 'camera_id' not in data:
         return jsonify({'error': 'camera_id is required'}), 400
@@ -247,7 +247,7 @@ def add_detection():
 @bp.route('/<int:detection_id>', methods=['PUT'])
 def update_detection(detection_id):
     """Update a detection (e.g., add track_id or match_score)."""
-    data = request.get_json()
+    data = request.get_json(force=True, silent=True)
     
     if not data:
         return jsonify({'error': 'Request body required'}), 400
