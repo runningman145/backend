@@ -110,6 +110,40 @@ def delete_camera(camera_id):
     return '', 204
 
 
+@bp.route('/<camera_id>/videos', methods=['GET'])
+def list_camera_videos(camera_id):
+    """List all videos from a specific camera."""
+    _get_or_404(camera_id)
+    
+    db = get_db()
+    limit = min(request.args.get('limit', 100, type=int), 1000)
+    offset = request.args.get('offset', 0, type=int)
+    
+    videos = db.execute(
+        '''SELECT id, filename, storage_path, size_bytes, duration_seconds, 
+                  captured_at, created_at, processed 
+           FROM videos 
+           WHERE camera_id = ? 
+           ORDER BY captured_at DESC 
+           LIMIT ? OFFSET ?''',
+        (camera_id, limit, offset)
+    ).fetchall()
+    
+    total = db.execute(
+        'SELECT COUNT(*) as count FROM videos WHERE camera_id = ?',
+        (camera_id,)
+    ).fetchone()['count']
+    
+    return jsonify({
+        'camera_id': camera_id,
+        'videos': [dict(v) for v in videos],
+        'count': len(videos),
+        'total': total,
+        'limit': limit,
+        'offset': offset
+    }), 200
+
+
 # ---------- helpers ----------
 
 def _get_or_404(camera_id):
