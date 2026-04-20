@@ -12,7 +12,7 @@ bp = Blueprint('cameras', __name__, url_prefix='/cameras')
 @bp.route('', methods=['POST'])
 def create_camera():
     """Add a new camera."""
-    data = request.get_json()
+    data = request.get_json(force=True, silent=True)
     if not data:
         return jsonify({'error': 'Request body is required'}), 400
 
@@ -66,7 +66,7 @@ def update_camera(camera_id):
     """Update name, latitude, longitude, and/or status of a camera."""
     _get_or_404(camera_id)
 
-    data = request.get_json()
+    data = request.get_json(force=True, silent=True)
     if not data:
         return jsonify({'error': 'Request body is required'}), 400
 
