@@ -2,8 +2,10 @@
 Video management endpoints.
 Handles video registration, retrieval, and batch processing.
 """
+import os
 from datetime import datetime
 from flask import Blueprint, jsonify, request, current_app
+from werkzeug.utils import secure_filename
 from ..db import get_db
 from ..video_management import (
     register_video, get_video_metadata, get_camera_videos,
@@ -12,44 +14,81 @@ from ..video_management import (
 
 bp = Blueprint('videos', __name__, url_prefix='/videos')
 
+ALLOWED_EXTENSIONS = {'mp4', 'mov', 'avi', 'mkv', 'flv', 'wmv'}
+
+def allowed_file(filename):
+    """Check if file extension is allowed."""
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
 
 @bp.route('/register', methods=['POST'])
 def register_video_route():
-    """Register a new video in the system."""
+    """Register and upload a new video in the system."""
     try:
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'Request body required'}), 400
+        # Check if file is present
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
         
-        required = ['camera_id', 'filename', 'storage_path', 'captured_at']
-        missing = [f for f in required if not data.get(f)]
-        if missing:
-            return jsonify({'error': f'Missing fields: {", ".join(missing)}'}), 400
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
         
-        # Verify camera exists
+        if not allowed_file(file.filename):
+            return jsonify({'error': f'File type not allowed. Allowed: {", ".join(ALLOWED_EXTENSIONS)}'}), 400
+        
+        # Get required form parameters
+        camera_name = request.form.get('camera_name')
+        
+        if not camera_name:
+            return jsonify({'error': 'camera_name is required'}), 400
+        
+        # Look up camera by name
         db = get_db()
-        camera = db.execute('SELECT id FROM cameras WHERE id = ?', (data['camera_id'],)).fetchone()
+        camera = db.execute('SELECT id FROM cameras WHERE name = ?', (camera_name,)).fetchone()
         if camera is None:
-            return jsonify({'error': f"Camera {data['camera_id']} not found"}), 404
+            return jsonify({'error': f"Camera '{camera_name}' not found"}), 404
         
-        # Parse captured_at
-        try:
-            captured_at = datetime.fromisoformat(data['captured_at'])
-        except ValueError:
-            return jsonify({'error': 'Invalid captured_at format, use ISO format'}), 400
+        camera_id = camera['id']
         
+        # Parse captured_at if provided, otherwise use current time
+        captured_at_str = request.form.get('captured_at')
+        if captured_at_str:
+            try:
+                captured_at = datetime.fromisoformat(captured_at_str)
+            except ValueError:
+                return jsonify({'error': 'Invalid captured_at format, use ISO format (e.g., 2026-04-20T14:20:00)'}), 400
+        else:
+            captured_at = datetime.now()
+        
+        # Save file to disk
+        uploads_dir = os.path.join(current_app.instance_path, 'uploads')
+        os.makedirs(uploads_dir, exist_ok=True)
+        
+        # Create safe filename
+        original_filename = secure_filename(file.filename)
+        filename = f"{captured_at.strftime('%Y%m%d_%H%M%S')}_{original_filename}"
+        storage_path = os.path.join(uploads_dir, filename)
+        
+        file.save(storage_path)
+        
+        # Get file size
+        size_bytes = os.path.getsize(storage_path)
+        
+        # Register video in database
         video_id = register_video(
-            camera_id=data['camera_id'],
-            filename=data['filename'],
-            storage_path=data['storage_path'],
+            camera_id=camera_id,
+            filename=filename,
+            storage_path=storage_path,
             captured_at=captured_at,
-            size_bytes=data.get('size_bytes'),
-            duration_seconds=data.get('duration_seconds')
+            size_bytes=size_bytes,
+            duration_seconds=request.form.get('duration_seconds', type=float)
         )
         
         return jsonify({
             'video_id': video_id,
-            'message': 'Video registered successfully'
+            'filename': filename,
+            'size_bytes': size_bytes,
+            'message': 'Video uploaded and registered successfully'
         }), 201
     
     except Exception as e:
