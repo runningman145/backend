@@ -8,9 +8,10 @@ from datetime import datetime
 from flask import Blueprint, jsonify, request, send_file, current_app
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
+from PIL import Image as PILImage
 from ..db import get_db
 
 bp = Blueprint('detections', __name__, url_prefix='/detections')
@@ -317,7 +318,7 @@ def delete_detection(detection_id):
 
 @bp.route('/<int:detection_id>/export-pdf', methods=['GET'])
 def export_detection_pdf(detection_id):
-    """Export a detection to PDF format with enhanced details."""
+    """Export a detection to PDF format with enhanced details including uploaded and matched images."""
     db = get_db()
     
     # Fetch detection with all details
@@ -343,7 +344,40 @@ def export_detection_pdf(detection_id):
     if detection is None:
         return jsonify({'error': f'Detection {detection_id} not found'}), 404
     
-    # Fetch associated matches
+    # Fetch query image filename (uploaded image) from jobs
+    query_job = db.execute(
+        '''
+        SELECT query_image_filename FROM jobs 
+        WHERE detection_id = ? 
+        LIMIT 1
+        ''',
+        (detection_id,)
+    ).fetchone()
+    
+    query_image_filename = query_job['query_image_filename'] if query_job else None
+    
+    # Fetch vehicle detections (matched vehicles from this query)
+    vehicle_detections = db.execute(
+        '''
+        SELECT 
+            vd.id,
+            vd.timestamp,
+            vd.match_score,
+            vd.camera_id,
+            vd.box_x1,
+            vd.box_y1,
+            vd.box_x2,
+            vd.box_y2,
+            c.name as camera_name
+        FROM vehicle_detections vd
+        JOIN cameras c ON vd.camera_id = c.id
+        WHERE vd.detection_id = ?
+        ORDER BY vd.match_score DESC
+        ''',
+        (detection_id,)
+    ).fetchall()
+    
+    # Fetch associated matches (legacy support)
     matches = db.execute(
         '''
         SELECT 
@@ -382,6 +416,14 @@ def export_detection_pdf(detection_id):
         fontSize=14,
         textColor=colors.HexColor('#2d5aa6'),
         spaceAfter=12,
+    )
+    
+    subheading_style = ParagraphStyle(
+        'SubHeading',
+        parent=styles['Heading3'],
+        fontSize=11,
+        textColor=colors.HexColor('#404040'),
+        spaceAfter=8,
     )
     
     # Title
@@ -435,11 +477,74 @@ def export_detection_pdf(detection_id):
         ('GRID', (0, 0), (-1, -1), 1, colors.grey),
     ]))
     elements.append(camera_table)
+    elements.append(Spacer(1, 0.3 * inch))
     
-    # Add matches section if there are any
+    # Uploaded/Query Image Section
+    if query_image_filename:
+        elements.append(Paragraph('Uploaded Query Image', heading_style))
+        upload_folder = os.path.join(current_app.instance_path, 'uploads')
+        query_image_path = os.path.join(upload_folder, query_image_filename)
+        
+        if os.path.exists(query_image_path):
+            try:
+                # Get image dimensions to scale appropriately
+                pil_image = PILImage.open(query_image_path)
+                img_width, img_height = pil_image.size
+                
+                # Scale to fit page width (max 5 inches)
+                max_width = 5 * inch
+                scale_factor = max_width / (img_width / 96)  # Assuming 96 DPI
+                if img_height / 96 * scale_factor > 4 * inch:
+                    scale_factor = (4 * inch) / (img_height / 96)
+                
+                display_width = (img_width / 96) * scale_factor
+                display_height = (img_height / 96) * scale_factor
+                
+                img = Image(query_image_path, width=display_width, height=display_height)
+                elements.append(img)
+                elements.append(Spacer(1, 0.2 * inch))
+            except Exception as e:
+                elements.append(Paragraph(f'Could not load query image: {str(e)}', styles['Normal']))
+                elements.append(Spacer(1, 0.2 * inch))
+        else:
+            elements.append(Paragraph(f'Query image not found: {query_image_filename}', styles['Normal']))
+            elements.append(Spacer(1, 0.2 * inch))
+    
+    # Vehicle Detections (Matched Vehicles) Section
+    if vehicle_detections:
+        elements.append(Paragraph('Matched Vehicle Detections', heading_style))
+        
+        # Summary table
+        vd_summary_data = [['Det ID', 'Camera', 'Timestamp (s)', 'Match Score', 'Box Coordinates']]
+        for vd in vehicle_detections:
+            box_coords = f"({vd['box_x1']}, {vd['box_y1']}, {vd['box_x2']}, {vd['box_y2']})"
+            vd_summary_data.append([
+                str(vd['id']),
+                vd['camera_name'],
+                f"{vd['timestamp']:.2f}",
+                f"{vd['match_score']:.2f}%" if vd.get('match_score') else 'N/A',
+                box_coords
+            ])
+        
+        vd_table = Table(vd_summary_data, colWidths=[0.8 * inch, 1.5 * inch, 1.2 * inch, 1.2 * inch, 1.5 * inch])
+        vd_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2d5aa6')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('TOPPADDING', (0, 0), (-1, -1), 8),
+            ('GRID', (0, 0), (-1, -1), 1, colors.grey),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ]))
+        elements.append(vd_table)
+        elements.append(Spacer(1, 0.2 * inch))
+    
+    # Add matches section if there are any (legacy support)
     if matches:
-        elements.append(Spacer(1, 0.3 * inch))
-        elements.append(Paragraph('Vehicle Matches', heading_style))
+        elements.append(Spacer(1, 0.1 * inch))
+        elements.append(Paragraph('Additional Matches', heading_style))
         
         # Prepare match data for table
         match_data = [['Match ID', 'Timestamp', 'Match Score', 'Track ID', 'Camera Name']]
