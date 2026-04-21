@@ -24,7 +24,9 @@ def store_vehicle_detection(detection_id, camera_id, timestamp, box, embedding, 
     """
     try:
         # Serialize embedding as JSON
-        embedding_bytes = json.dumps(embedding.tolist()).encode('utf-8')
+        # Handle both numpy arrays and lists
+        embedding_list = embedding.tolist() if hasattr(embedding, 'tolist') else embedding
+        embedding_bytes = json.dumps(embedding_list).encode('utf-8')
         
         box_area = (box['x2'] - box['x1']) * (box['y2'] - box['y1'])
         
