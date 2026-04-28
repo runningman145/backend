@@ -2,7 +2,10 @@
 Job queue endpoints.
 Provides endpoints for queuing and monitoring video processing jobs.
 """
-from flask import Blueprint, jsonify, request, current_app
+import json
+import csv
+from io import StringIO, BytesIO
+from flask import Blueprint, jsonify, request, current_app, send_file
 from ..jobs import create_job, get_job_status
 from ..db import get_db
 
@@ -139,3 +142,141 @@ def list_jobs():
     except Exception as e:
         current_app.logger.error(f"Error listing jobs: {str(e)}")
         return jsonify({'error': f'Failed to list jobs: {str(e)}'}), 500
+
+
+@bp.route('/<job_id>/results/json', methods=['GET'])
+def get_job_results_json(job_id):
+    """
+    Download raw results as JSON.
+    
+    Returns:
+        JSON file with raw results from the completed job.
+        Only available for completed jobs.
+    """
+    try:
+        job = get_job_status(job_id)
+        if job is None:
+            return jsonify({'error': 'Job not found'}), 404
+        
+        if job['status'] != 'completed':
+            return jsonify({
+                'error': f"Results not available for job in '{job['status']}' status"
+            }), 400
+        
+        db = get_db()
+        result = db.execute(
+            'SELECT result_data FROM jobs WHERE id = ?',
+            (job_id,)
+        ).fetchone()
+        
+        if not result or not result['result_data']:
+            return jsonify({'error': 'No results found for this job'}), 404
+        
+        result_data = json.loads(result['result_data'])
+        
+        # Create BytesIO object for file download
+        json_bytes = BytesIO(
+            json.dumps(result_data, indent=2).encode('utf-8')
+        )
+        json_bytes.seek(0)
+        
+        return send_file(
+            json_bytes,
+            mimetype='application/json',
+            as_attachment=True,
+            download_name=f'job_{job_id}_results.json'
+        )
+    
+    except Exception as e:
+        current_app.logger.error(f"Error downloading job results as JSON: {str(e)}")
+        return jsonify({'error': f'Failed to download results: {str(e)}'}), 500
+
+
+@bp.route('/<job_id>/results/csv', methods=['GET'])
+def get_job_results_csv(job_id):
+    """
+    Download raw results as CSV.
+    
+    Returns:
+        CSV file with results from the completed job.
+        Only available for completed jobs.
+        Flattens nested JSON structures.
+    """
+    try:
+        job = get_job_status(job_id)
+        if job is None:
+            return jsonify({'error': 'Job not found'}), 404
+        
+        if job['status'] != 'completed':
+            return jsonify({
+                'error': f"Results not available for job in '{job['status']}' status"
+            }), 400
+        
+        db = get_db()
+        result = db.execute(
+            'SELECT result_data FROM jobs WHERE id = ?',
+            (job_id,)
+        ).fetchone()
+        
+        if not result or not result['result_data']:
+            return jsonify({'error': 'No results found for this job'}), 404
+        
+        result_data = json.loads(result['result_data'])
+        
+        # Helper function to flatten nested structures
+        def flatten_dict(d, parent_key='', sep='_'):
+            """Flatten nested dictionary."""
+            items = []
+            if isinstance(d, dict):
+                for k, v in d.items():
+                    new_key = f"{parent_key}{sep}{k}" if parent_key else k
+                    if isinstance(v, dict):
+                        items.extend(flatten_dict(v, new_key, sep=sep).items())
+                    elif isinstance(v, list):
+                        # Convert lists to JSON string
+                        items.append((new_key, json.dumps(v)))
+                    else:
+                        items.append((new_key, v))
+            elif isinstance(d, list):
+                # If root is a list, process each item
+                for i, item in enumerate(d):
+                    flattened = flatten_dict(item, '', sep=sep)
+                    if i == 0:
+                        items.extend(flattened.items())
+                    else:
+                        break
+            return dict(items)
+        
+        # Handle both dict and list results
+        if isinstance(result_data, list):
+            # List of detections/matches
+            rows = [flatten_dict(item) for item in result_data]
+        else:
+            # Single result object
+            rows = [flatten_dict(result_data)]
+        
+        if not rows:
+            return jsonify({'error': 'No data to export'}), 400
+        
+        # Create CSV in memory
+        csv_buffer = StringIO()
+        fieldnames = list(rows[0].keys())
+        writer = csv.DictWriter(csv_buffer, fieldnames=fieldnames)
+        
+        writer.writeheader()
+        writer.writerows(rows)
+        
+        csv_bytes = BytesIO(csv_buffer.getvalue().encode('utf-8'))
+        csv_bytes.seek(0)
+        
+        return send_file(
+            csv_bytes,
+            mimetype='text/csv',
+            as_attachment=True,
+            download_name=f'job_{job_id}_results.csv'
+        )
+    
+    except Exception as e:
+        current_app.logger.error(f"Error downloading job results as CSV: {str(e)}")
+        return jsonify({'error': f'Failed to download results: {str(e)}'}), 500
+

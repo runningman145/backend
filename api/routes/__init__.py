@@ -2,7 +2,7 @@
 Routes module - contains all API endpoint blueprints.
 Each file handles routes for a specific resource.
 """
-from . import health, cameras, detections, uploads, videos, jobs
+from . import health, cameras, detections, uploads, videos, jobs, reports
 
 
 def register_routes(app):
@@ -13,3 +13,4 @@ def register_routes(app):
     app.register_blueprint(uploads.bp)
     app.register_blueprint(videos.bp)
     app.register_blueprint(jobs.bp)
+    app.register_blueprint(reports.bp)
