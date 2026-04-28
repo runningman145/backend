@@ -80,3 +80,23 @@ def process_job(job):
         error_msg = str(e)
         current_app.logger.error(f"Job {job_id} failed: {error_msg}")
         update_job_status(job_id, 'failed', error_message=error_msg)
+
+
+def update_job_progress(job_id, frames_total, frames_processed):
+    """
+    Update job progress during processing.
+    
+    Args:
+        job_id: UUID of the job
+        frames_total: Total number of frames in video
+        frames_processed: Number of frames processed so far
+    """
+    progress_percent = (frames_processed / frames_total * 100) if frames_total > 0 else 0
+    
+    progress_data = json.dumps({
+        'frames_total': frames_total,
+        'frames_processed': frames_processed,
+        'progress_percent': round(progress_percent, 1),
+    })
+    
+    update_job_status(job_id, 'processing', result_data=progress_data)

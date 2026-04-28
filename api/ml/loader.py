@@ -67,6 +67,7 @@ def load_models():
     # Load ReID model
     try:
         # Use pretrained weights for better feature extraction
+        # TODO: Use pretrained model.pth file and not pretrained ResNet
         reid_model = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
         # Remove the final classification layer to get embeddings
         reid_model.fc = torch.nn.Identity()
@@ -78,6 +79,8 @@ def load_models():
         except RuntimeError:
             # Not in Flask context
             pass
+
+        # TODO: handle loading the pretrained model.pth file
             
         if reid_model_path:
             try:

@@ -49,7 +49,11 @@ def get_job_status(job_id):
     """
     db = get_db()
     job = db.execute(
-        'SELECT id, status, result_data, error_message, created_at, started_at, completed_at FROM jobs WHERE id = ?',
+        'SELECT j.id, j.status, j.result_data, j.error_message, j.created_at, j.started_at, j.completed_at, '
+        '       j.query_image_filename, c.name as camera_name '
+        'FROM jobs j '
+        'LEFT JOIN cameras c ON j.camera_id = c.id '
+        'WHERE j.id = ?',
         (job_id,)
     ).fetchone()
     
@@ -62,10 +66,13 @@ def get_job_status(job_id):
         'created_at': job['created_at'],
         'started_at': job['started_at'],
         'completed_at': job['completed_at'],
+        'camera_name': job['camera_name'],
+        'query_image_filename': job['query_image_filename'],
     }
     
     if job['result_data']:
-        result['results'] = json.loads(job['result_data'])
+        result_data = json.loads(job['result_data'])
+        result.update(result_data)
     
     if job['error_message']:
         result['error'] = job['error_message']

@@ -37,6 +37,8 @@ def queue_video_job():
             return jsonify({'error': f'Camera {camera_id} not found'}), 404
         
         # Get processing parameters
+        # we would also want to select a time range and and a camera location,
+        # parameter to get from frontend, multiple images can have single job
         threshold = request.json.get('threshold', 40) if request.json else 40
         frame_skip = request.json.get('frame_skip', 15) if request.json else 15
         detection_id = request.json.get('detection_id') if request.json else None
@@ -56,6 +58,7 @@ def queue_video_job():
             frame_skip=frame_skip
         )
         
+        # TODO: return name of file being processed
         return jsonify({
             'job_id': job_id,
             'status': 'queued',
