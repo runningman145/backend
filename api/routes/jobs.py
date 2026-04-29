@@ -6,7 +6,7 @@ import json
 import csv
 from io import StringIO, BytesIO
 from flask import Blueprint, jsonify, request, current_app, send_file
-from ..jobs import create_job, get_job_status
+from ..jobs import create_job, get_job_status, get_jobs_by_date_and_time
 from ..db import get_db
 
 bp = Blueprint('jobs', __name__, url_prefix='/jobs')
@@ -142,6 +142,63 @@ def list_jobs():
     except Exception as e:
         current_app.logger.error(f"Error listing jobs: {str(e)}")
         return jsonify({'error': f'Failed to list jobs: {str(e)}'}), 500
+
+
+@bp.route('/search/by-date-time', methods=['GET'])
+def search_jobs_by_date_time():
+    """
+    Search for jobs by date and time range.
+    
+    Query parameters:
+        camera_id: Optional camera ID filter
+        job_date: Optional date in YYYY-MM-DD format
+        start_time: Optional start time in HH:MM:SS format
+        end_time: Optional end time in HH:MM:SS format
+        limit: Number of jobs to return (default 100, max 500)
+        offset: Pagination offset (default 0)
+    
+    Returns:
+        List of jobs matching the criteria
+    """
+    try:
+        camera_id = request.args.get('camera_id')
+        job_date = request.args.get('job_date')
+        start_time = request.args.get('start_time')
+        end_time = request.args.get('end_time')
+        limit = min(request.args.get('limit', 100, type=int), 500)
+        offset = request.args.get('offset', 0, type=int)
+        
+        # At least one filter should be specified
+        if not any([camera_id, job_date, start_time, end_time]):
+            return jsonify({
+                'error': 'At least one filter (camera_id, job_date, start_time, or end_time) is required'
+            }), 400
+        
+        jobs = get_jobs_by_date_and_time(
+            camera_id=camera_id,
+            job_date=job_date,
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+            offset=offset
+        )
+        
+        return jsonify({
+            'jobs': jobs,
+            'count': len(jobs),
+            'limit': limit,
+            'offset': offset,
+            'filters': {
+                'camera_id': camera_id,
+                'job_date': job_date,
+                'start_time': start_time,
+                'end_time': end_time
+            }
+        }), 200
+    
+    except Exception as e:
+        current_app.logger.error(f"Error searching jobs by date/time: {str(e)}")
+        return jsonify({'error': f'Failed to search jobs: {str(e)}'}), 500
 
 
 @bp.route('/<job_id>/results/json', methods=['GET'])

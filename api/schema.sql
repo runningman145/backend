@@ -81,6 +81,9 @@ CREATE TABLE jobs (
     query_image_filename TEXT,
     threshold REAL DEFAULT 40,
     frame_skip INTEGER DEFAULT 15,
+    job_date DATE,
+    start_time TIME,
+    end_time TIME,
     result_data TEXT,
     error_message TEXT,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -88,6 +91,16 @@ CREATE TABLE jobs (
     completed_at TIMESTAMP,
     FOREIGN KEY (camera_id) REFERENCES cameras(id),
     FOREIGN KEY (detection_id) REFERENCES detections(id)
+);
+
+-- a table for linking multiple query images to a single job
+CREATE TABLE job_query_images (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL,
+    query_image_filename TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (job_id) REFERENCES jobs(id),
+    UNIQUE(job_id, query_image_filename)
 );
 
 -- a table for videos linked to cameras

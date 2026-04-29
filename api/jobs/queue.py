@@ -57,7 +57,8 @@ class JobQueue:
         try:
             db = get_db()
             job = db.execute(
-                'SELECT id, camera_id, detection_id, video_filename, query_image_filename, threshold, frame_skip '
+                'SELECT id, camera_id, detection_id, video_filename, query_image_filename, threshold, frame_skip, '
+                'job_date, start_time, end_time, status '
                 'FROM jobs WHERE status = ? ORDER BY created_at ASC LIMIT 1',
                 ('pending',)
             ).fetchone()
