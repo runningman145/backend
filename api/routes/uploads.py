@@ -145,6 +145,10 @@ def batch_upload_media():
         start_time = request.form.get('start_time')
         end_time = request.form.get('end_time')
         threshold = float(request.form.get('threshold', 40))
+        # Frontend sends threshold in 0–1 range (e.g. 0.5 → 50%).
+        # inference.py compares against similarity*100, so scale up here.
+        if threshold <= 1.0:
+            threshold = threshold * 100
         frame_skip = int(request.form.get('frame_skip', 15))
         
         # Validate required parameters

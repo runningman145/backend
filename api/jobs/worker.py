@@ -14,46 +14,63 @@ from ..ml.inference import extract_embedding, process_video_data
 from .models import update_job_status
 
 
+def _is_cancelled(job_id):
+    """Poll the DB to check if this job has been marked cancelled."""
+    try:
+        db = get_db()
+        row = db.execute('SELECT status FROM jobs WHERE id = ?', (job_id,)).fetchone()
+        return row is not None and row['status'] == 'cancelled'
+    except Exception:
+        return False
+
+
 def process_job(job):
     """Process a single video detection job."""
     job_id = job['id']
-    
+
     try:
-        # Mark job as processing
-        update_job_status(job_id, 'processing')
-        
+        # The queue already marked this job 'processing' atomically; bail out
+        # immediately if it was cancelled between being claimed and now.
+        if _is_cancelled(job_id):
+            current_app.logger.info(f"Job {job_id} was cancelled before processing started")
+            return
+
         # Load models once
         models = get_models()
         yolo_model = models['yolo']
         reid_model = models['reid']
         transform_func = models['transform']
         device = models['device']
-        
+
         upload_folder = os.path.join(current_app.instance_path, 'uploads')
         db = get_db()
-        
+
         # Check if this is a batch job (has job_date and time range)
         is_batch_job = job['job_date'] and job['start_time'] and job['end_time']
-        
+
         if is_batch_job:
             # Batch job: process multiple query images against videos in time range
             process_batch_job(
-                job, db, upload_folder, yolo_model, reid_model, 
+                job, db, upload_folder, yolo_model, reid_model,
                 transform_func, device
             )
         else:
             # Legacy single job: process single query image against single video
             process_single_job(
-                job, db, upload_folder, yolo_model, reid_model, 
+                job, db, upload_folder, yolo_model, reid_model,
                 transform_func, device
             )
-        
-        current_app.logger.info(f"Job {job_id} completed successfully")
-        
+
+        # Only log success if the job wasn't cancelled mid-flight
+        if not _is_cancelled(job_id):
+            current_app.logger.info(f"Job {job_id} completed successfully")
+
     except Exception as e:
         error_msg = str(e)
         current_app.logger.error(f"Job {job_id} failed: {error_msg}")
-        update_job_status(job_id, 'failed', error_message=error_msg)
+        # Don't overwrite a cancelled status with 'failed'
+        if not _is_cancelled(job_id):
+            update_job_status(job_id, 'failed', error_message=error_msg)
 
 
 def process_single_job(job, db, upload_folder, yolo_model, reid_model, transform_func, device):
@@ -87,17 +104,17 @@ def process_single_job(job, db, upload_folder, yolo_model, reid_model, transform
         job['detection_id'], job['camera_id']
     )
     
-    # Store detection matches in database
+    # Store detection matches in database (frame_image is not a DB column – strip it)
     for result in results:
         db.execute(
             'INSERT INTO detection_matches (detection_id, similarity_score, timestamp) VALUES (?, ?, ?)',
             (job['detection_id'], result['match_percent'], result['time'])
         )
     db.commit()
-    
-    # Mark job as completed with results
+
+    # Mark job as completed with full results including frame_image for display
     result_data = json.dumps({
-        'matches': results,
+        'matches': results,           # frame_image is preserved here
         'total_matches': len(results),
     })
     update_job_status(job_id, 'completed', result_data=result_data)
@@ -131,13 +148,15 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
     start_datetime = f"{job_date} {start_time}"
     end_datetime = f"{job_date} {end_time}"
     
-    # Get videos for the specified camera, date, and time range
-    # Using datetime comparison
+    # Get videos for the specified camera, date, and time range.
+    # REPLACE(captured_at, 'T', ' ') normalises ISO-8601 'T'-separator
+    # timestamps (stored by older code) so they compare correctly with
+    # the space-separated datetime strings we build from job_date/time.
     query = '''
-        SELECT id, filename FROM videos 
-        WHERE camera_id = ? 
-        AND captured_at >= datetime(?)
-        AND captured_at <= datetime(?)
+        SELECT id, filename FROM videos
+        WHERE camera_id = ?
+        AND REPLACE(captured_at, 'T', ' ') >= ?
+        AND REPLACE(captured_at, 'T', ' ') <= ?
         ORDER BY captured_at
     '''
     videos = db.execute(query, (camera_id, start_datetime, end_datetime)).fetchall()
@@ -145,7 +164,7 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
     if not videos:
         # Log more details for debugging
         all_videos = db.execute(
-            'SELECT filename, captured_at FROM videos WHERE camera_id = ? ORDER BY captured_at DESC LIMIT 5',
+            'SELECT filename, REPLACE(captured_at, \'T\', \' \') as captured_at FROM videos WHERE camera_id = ? ORDER BY captured_at DESC LIMIT 5',
             (camera_id,)
         ).fetchall()
         current_app.logger.warning(f"Looking for videos between {start_datetime} and {end_datetime}")
@@ -156,47 +175,57 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
     
     # Process each query image against all videos
     for query_image_filename in query_images:
+        # Check for cancellation before each query image
+        if _is_cancelled(job_id):
+            current_app.logger.info(f"Job {job_id} cancelled during batch processing")
+            return
+
         query_image_path = os.path.join(upload_folder, query_image_filename)
-        
+
         if not os.path.exists(query_image_path):
             current_app.logger.warning(f"Query image not found: {query_image_path}")
             continue
-        
+
         query_image = cv2.imread(query_image_path)
         if query_image is None:
             current_app.logger.warning(f"Could not read query image: {query_image_filename}")
             continue
-        
+
         # Extract embedding for this query image
         query_image_rgb = cv2.cvtColor(query_image, cv2.COLOR_BGR2RGB)
         query_embedding = extract_embedding(
             query_image_rgb, reid_model, transform_func, device
         )
-        
+
         # Process each video
         for video in videos:
+            # Check for cancellation before each video
+            if _is_cancelled(job_id):
+                current_app.logger.info(f"Job {job_id} cancelled during batch processing")
+                return
+
             video_path = os.path.join(upload_folder, video['filename'])
-            
+
             if not os.path.exists(video_path):
                 current_app.logger.warning(f"Video file not found: {video_path}")
                 continue
-            
+
             try:
                 with open(video_path, 'rb') as f:
                     video_data = f.read()
-                
+
                 results = process_video_data(
                     video_data, yolo_model, reid_model, transform_func, device,
                     query_embedding, threshold, frame_skip,
                     None, camera_id  # No single detection_id for batch jobs
                 )
-                
+
                 # Add video and query image info to results
                 for result in results:
                     result['query_image'] = query_image_filename
                     result['video_id'] = video['id']
                     result['video_filename'] = video['filename']
-                
+
                 all_results.extend(results)
             except Exception as e:
                 current_app.logger.error(f"Error processing video {video['filename']}: {str(e)}")

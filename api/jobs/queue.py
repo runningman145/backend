@@ -22,7 +22,26 @@ class JobQueue:
         """Start worker threads."""
         self.running = True
         self.app = app
-        
+
+        # Reset any jobs that were left in 'processing' state from a previous
+        # server run (e.g. a crash or SIGKILL).  They never finished, so mark
+        # them pending so the workers will pick them up again.
+        with app.app_context():
+            try:
+                from ..db import get_db
+                db = get_db()
+                result = db.execute(
+                    "UPDATE jobs SET status = 'pending', started_at = NULL "
+                    "WHERE status = 'processing'"
+                )
+                db.commit()
+                if result.rowcount:
+                    current_app.logger.warning(
+                        f"Reset {result.rowcount} stale 'processing' job(s) to 'pending' on startup"
+                    )
+            except Exception as e:
+                current_app.logger.error(f"Failed to reset stale jobs: {str(e)}")
+
         for i in range(self.num_workers):
             worker = threading.Thread(
                 target=self._worker_loop,
@@ -53,17 +72,33 @@ class JobQueue:
                     threading.Event().wait(0.5)
     
     def _get_next_pending_job(self):
-        """Get the next pending job from the queue."""
+        """Atomically claim the next pending job by immediately marking it
+        'processing', preventing two worker threads from picking up the same job."""
         try:
             db = get_db()
+            # Use a write-level transaction so only one worker claims this row.
+            db.execute('BEGIN IMMEDIATE')
             job = db.execute(
-                'SELECT id, camera_id, detection_id, video_filename, query_image_filename, threshold, frame_skip, '
-                'job_date, start_time, end_time, status '
+                'SELECT id, camera_id, detection_id, video_filename, query_image_filename, '
+                'threshold, frame_skip, job_date, start_time, end_time, status '
                 'FROM jobs WHERE status = ? ORDER BY created_at ASC LIMIT 1',
                 ('pending',)
             ).fetchone()
+            if job:
+                from datetime import datetime
+                db.execute(
+                    'UPDATE jobs SET status = ?, started_at = ? WHERE id = ?',
+                    ('processing', datetime.utcnow().isoformat(), job['id'])
+                )
+                db.commit()
+            else:
+                db.execute('ROLLBACK')
             return job
         except Exception as e:
+            try:
+                db.execute('ROLLBACK')
+            except Exception:
+                pass
             current_app.logger.error(f"Error fetching pending job: {str(e)}")
             return None
 

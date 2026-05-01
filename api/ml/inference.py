@@ -2,6 +2,7 @@
 Inference helpers for video processing and embedding extraction.
 Handles YOLO detection and ReID embedding generation.
 """
+import base64
 import cv2
 import numpy as np
 import tempfile
@@ -10,6 +11,24 @@ import os
 from flask import current_app
 from .loader import MODEL_CONFIG, get_models
 from .reid import cosine_similarity
+
+
+def _encode_frame_as_base64(bgr_crop: np.ndarray) -> str:
+    """
+    JPEG-encode a BGR numpy array and return a base64 data-URI string.
+
+    Args:
+        bgr_crop: BGR image array (vehicle crop)
+
+    Returns:
+        Base64-encoded JPEG as a data URI string, e.g.
+        'data:image/jpeg;base64,/9j/4AAQ...'
+    """
+    success, buffer = cv2.imencode('.jpg', bgr_crop, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if not success:
+        return ''
+    b64 = base64.b64encode(buffer).decode('utf-8')
+    return f'data:image/jpeg;base64,{b64}'
 
 
 def extract_embedding(image, model, transform_func, device):
@@ -163,12 +182,16 @@ def process_video_data(video_data, yolo_model, reid_model, transform_func, devic
                     # Check if match meets threshold
                     if similarity > threshold:
                         timestamp = frame_id / fps if fps > 0 else 0
-                        
+
+                        # Encode the vehicle crop as base64 for downstream display
+                        frame_image = _encode_frame_as_base64(vehicle_crop)
+
                         result = {
                             'time': round(timestamp, 2),
                             'match_percent': round(similarity, 2),
                             'box': {'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2},
-                            'frame_id': frame_id
+                            'frame_id': frame_id,
+                            'frame_image': frame_image,  # base64 JPEG data-URI of the vehicle crop
                         }
                         
                         # Store vehicle detection for cross-camera tracking

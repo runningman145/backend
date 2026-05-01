@@ -2,6 +2,8 @@
 Detection endpoints.
 Handles creation and retrieval of vehicle detections, and PDF export.
 """
+import base64
+import json
 import os
 from io import BytesIO
 from datetime import datetime
@@ -510,6 +512,24 @@ def export_detection_pdf(detection_id):
             elements.append(Paragraph(f'Query image not found: {query_image_filename}', styles['Normal']))
             elements.append(Spacer(1, 0.2 * inch))
     
+    # -----------------------------------------------------------------------
+    # Pull frame images stored in the job's result_data JSON
+    # -----------------------------------------------------------------------
+    job_frame_matches = []
+    job_result_row = db.execute(
+        'SELECT result_data FROM jobs WHERE detection_id = ? ORDER BY created_at DESC LIMIT 1',
+        (detection_id,)
+    ).fetchone()
+    if job_result_row and job_result_row['result_data']:
+        try:
+            job_result = json.loads(job_result_row['result_data'])
+            job_frame_matches = [
+                m for m in job_result.get('matches', [])
+                if m.get('frame_image')
+            ]
+        except Exception as e:
+            current_app.logger.warning(f'Could not parse job result_data for frames: {e}')
+
     # Vehicle Detections (Matched Vehicles) Section
     if vehicle_detections:
         elements.append(Paragraph('Matched Vehicle Detections', heading_style))
@@ -540,6 +560,60 @@ def export_detection_pdf(detection_id):
         ]))
         elements.append(vd_table)
         elements.append(Spacer(1, 0.2 * inch))
+
+    # -----------------------------------------------------------------------
+    # Vehicle Frame Images Section
+    # Embed each matched-vehicle crop (base64 JPEG) stored in the job results.
+    # -----------------------------------------------------------------------
+    if job_frame_matches:
+        elements.append(PageBreak())
+        elements.append(Paragraph('Matched Vehicle Frames', heading_style))
+        elements.append(Spacer(1, 0.1 * inch))
+
+        for idx, match in enumerate(job_frame_matches, 1):
+            try:
+                # Strip data-URI prefix if present
+                b64_data = match['frame_image']
+                if ',' in b64_data:
+                    b64_data = b64_data.split(',', 1)[1]
+
+                img_bytes = base64.b64decode(b64_data)
+                img_buffer = BytesIO(img_bytes)
+
+                # Determine display dimensions (max 3 in wide, proportional)
+                pil_img = PILImage.open(BytesIO(img_bytes))
+                iw, ih = pil_img.size
+                max_w = 3.0 * inch
+                scale = max_w / iw if iw > 0 else 1
+                disp_w = iw * scale
+                disp_h = ih * scale
+                # Cap height at 2.5 inches
+                if disp_h > 2.5 * inch:
+                    scale = (2.5 * inch) / ih
+                    disp_w = iw * scale
+                    disp_h = ih * scale
+
+                # Sub-caption: timestamp + score
+                ts = match.get('time', 'N/A')
+                score = match.get('match_percent', 'N/A')
+                caption = (
+                    f'Frame {idx} — Timestamp: {ts}s | '
+                    f'Match: {score}%'
+                )
+                elements.append(Paragraph(caption, subheading_style))
+
+                rl_img = Image(img_buffer, width=disp_w, height=disp_h)
+                elements.append(rl_img)
+                elements.append(Spacer(1, 0.25 * inch))
+
+            except Exception as e:
+                current_app.logger.warning(
+                    f'Could not embed frame image for match {idx}: {e}'
+                )
+                elements.append(
+                    Paragraph(f'Frame {idx}: image unavailable ({e})', styles['Normal'])
+                )
+                elements.append(Spacer(1, 0.1 * inch))
     
     # Add matches section if there are any (legacy support)
     if matches:

@@ -4,6 +4,7 @@ Provides endpoints for queuing and monitoring video processing jobs.
 """
 import json
 import csv
+from datetime import datetime
 from io import StringIO, BytesIO
 from flask import Blueprint, jsonify, request, current_app, send_file
 from ..jobs import create_job, get_job_status, get_jobs_by_date_and_time
@@ -102,6 +103,41 @@ def get_job_status_route(job_id):
         return jsonify({'error': f'Failed to get job status: {str(e)}'}), 500
 
 
+@bp.route('/<job_id>/cancel', methods=['PATCH'])
+def cancel_job(job_id):
+    """
+    Cancel a pending or processing job.
+
+    Only jobs in 'pending' or 'processing' state can be cancelled.
+    The worker polls the DB between iterations and will stop as soon
+    as it sees the 'cancelled' status.
+    """
+    try:
+        db = get_db()
+        job = db.execute('SELECT id, status FROM jobs WHERE id = ?', (job_id,)).fetchone()
+
+        if job is None:
+            return jsonify({'error': 'Job not found'}), 404
+
+        if job['status'] not in ('pending', 'processing'):
+            return jsonify({
+                'error': f"Cannot cancel a job that is already '{job['status']}'"
+            }), 400
+
+        db.execute(
+            "UPDATE jobs SET status = 'cancelled', completed_at = ? WHERE id = ?",
+            (datetime.utcnow().isoformat(), job_id)
+        )
+        db.commit()
+
+        current_app.logger.info(f"Job {job_id} cancelled by user")
+        return jsonify({'job_id': job_id, 'status': 'cancelled'}), 200
+
+    except Exception as e:
+        current_app.logger.error(f"Error cancelling job: {str(e)}")
+        return jsonify({'error': f'Failed to cancel job: {str(e)}'}), 500
+
+
 @bp.route('', methods=['GET'])
 def list_jobs():
     """
@@ -119,7 +155,14 @@ def list_jobs():
         
         db = get_db()
         
-        query = 'SELECT id, status, created_at, started_at, completed_at FROM jobs'
+        query = (
+            'SELECT id, status, camera_id, detection_id, '
+            'query_image_filename, threshold, frame_skip, '
+            'job_date, start_time, end_time, '
+            'result_data, error_message, '
+            'created_at, started_at, completed_at '
+            'FROM jobs'
+        )
         params = []
         
         if status_filter:
@@ -131,9 +174,29 @@ def list_jobs():
         
         jobs = db.execute(query, params).fetchall()
         
+        job_list = []
+        for job in jobs:
+            job_dict = dict(job)
+            # Provide a human-readable file_name for the frontend.
+            # Batch jobs have their filenames in job_query_images; expose a
+            # placeholder here so the frontend always gets a non-null value.
+            if job_dict.get('query_image_filename'):
+                job_dict['file_name'] = job_dict['query_image_filename']
+            else:
+                # Batch job – fetch first query image filename as label
+                first = db.execute(
+                    'SELECT query_image_filename FROM job_query_images '
+                    'WHERE job_id = ? ORDER BY created_at LIMIT 1',
+                    (job_dict['id'],)
+                ).fetchone()
+                job_dict['file_name'] = first['query_image_filename'] if first else 'Batch Job'
+            # Strip the heavy result_data blob from the list view
+            job_dict.pop('result_data', None)
+            job_list.append(job_dict)
+        
         return jsonify({
-            'jobs': [dict(job) for job in jobs],
-            'count': len(jobs),
+            'jobs': job_list,
+            'count': len(job_list),
             'limit': limit,
             'offset': offset,
             'filter_status': status_filter
@@ -309,8 +372,17 @@ def get_job_results_csv(job_id):
             # List of detections/matches
             rows = [flatten_dict(item) for item in result_data]
         else:
-            # Single result object
-            rows = [flatten_dict(result_data)]
+            # Single result object — check if there's a 'matches' key
+            matches = result_data.get('matches', None)
+            if matches is not None:
+                rows = [flatten_dict(item) for item in matches]
+            else:
+                rows = [flatten_dict(result_data)]
+
+        # Strip frame_image from every row — it is a large base64 blob that
+        # has no value in a CSV and would make the file unreadable.
+        for row in rows:
+            row.pop('frame_image', None)
         
         if not rows:
             return jsonify({'error': 'No data to export'}), 400
@@ -337,3 +409,60 @@ def get_job_results_csv(job_id):
         current_app.logger.error(f"Error downloading job results as CSV: {str(e)}")
         return jsonify({'error': f'Failed to download results: {str(e)}'}), 500
 
+
+@bp.route('/<job_id>/results/matches', methods=['GET'])
+def get_job_matches(job_id):
+    """
+    Return the matches array for a completed job as a JSON response.
+
+    This includes the 'frame_image' base64 field on each match so the
+    frontend can render vehicle frame thumbnails without re-processing
+    the video.
+
+    Returns:
+    {
+        'job_id': '<job_id>',
+        'total_matches': int,
+        'matches': [
+            {
+                'time': float,           // timestamp in seconds
+                'match_percent': float,  // similarity as 0-100
+                'frame_id': int,
+                'box': { x1, y1, x2, y2 },
+                'frame_image': 'data:image/jpeg;base64,...'  // JPEG crop
+            },
+            ...
+        ]
+    }
+    """
+    try:
+        job = get_job_status(job_id)
+        if job is None:
+            return jsonify({'error': 'Job not found'}), 404
+
+        if job['status'] != 'completed':
+            return jsonify({
+                'error': f"Results not available for job in '{job['status']}' status"
+            }), 400
+
+        db = get_db()
+        result = db.execute(
+            'SELECT result_data FROM jobs WHERE id = ?',
+            (job_id,)
+        ).fetchone()
+
+        if not result or not result['result_data']:
+            return jsonify({'error': 'No results found for this job'}), 404
+
+        result_data = json.loads(result['result_data'])
+        matches = result_data.get('matches', [])
+
+        return jsonify({
+            'job_id': job_id,
+            'total_matches': len(matches),
+            'matches': matches,  # frame_image included per match
+        }), 200
+
+    except Exception as e:
+        current_app.logger.error(f"Error fetching job matches: {str(e)}")
+        return jsonify({'error': f'Failed to fetch matches: {str(e)}'}), 500

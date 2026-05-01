@@ -31,7 +31,7 @@ def register_video(camera_id, filename, storage_path, captured_at, size_bytes=No
         db.execute(
             '''INSERT INTO videos (id, camera_id, filename, storage_path, captured_at, size_bytes, duration_seconds)
                VALUES (?, ?, ?, ?, ?, ?, ?)''',
-            (video_id, camera_id, filename, storage_path, captured_at.isoformat(), size_bytes, duration_seconds)
+            (video_id, camera_id, filename, storage_path, captured_at.isoformat(sep=' '), size_bytes, duration_seconds)
         )
         db.commit()
         
