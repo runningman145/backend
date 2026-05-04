@@ -186,7 +186,7 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
     # 1. REPLACE('T', ' ') to handle ISO-8601 format
     # 2. SUBSTR(..., 1, 19) to strip timezone info (e.g., +00:00)
     query = '''
-        SELECT id, filename FROM videos
+        SELECT id, filename, SUBSTR(REPLACE(captured_at, 'T', ' '), 1, 19) as captured_at_utc
         WHERE camera_id = ?
         AND SUBSTR(REPLACE(captured_at, 'T', ' '), 1, 19) >= ?
         AND SUBSTR(REPLACE(captured_at, 'T', ' '), 1, 19) <= ?
@@ -250,6 +250,45 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
             try:
                 pair_flat = qi * num_videos + vi
 
+                # -------------------------------------------------------- #
+                # Trim within the selected video based on overlap           #
+                # -------------------------------------------------------- #
+                # videos.captured_at is treated as the video's start time in UTC.
+                # We'll process only the overlap between:
+                #   [video_start, video_start + duration] and [job_start, job_end]
+                start_seconds = None
+                end_seconds = None
+                try:
+                    video_start_utc = datetime.strptime(video['captured_at_utc'], '%Y-%m-%d %H:%M:%S')
+                    job_start_utc = datetime.strptime(start_datetime_utc, '%Y-%m-%d %H:%M:%S')
+                    job_end_utc = datetime.strptime(end_datetime_utc, '%Y-%m-%d %H:%M:%S')
+
+                    # Read duration from the actual file (fast; no full decode)
+                    cap = cv2.VideoCapture(video_path)
+                    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+                    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0
+                    cap.release()
+
+                    duration_s = 0.0
+                    if fps and fps > 0 and frame_count and frame_count > 0:
+                        duration_s = float(frame_count) / float(fps)
+
+                    if duration_s and duration_s > 0:
+                        video_end_utc = video_start_utc + timedelta(seconds=duration_s)
+                        overlap_start = max(video_start_utc, job_start_utc)
+                        overlap_end = min(video_end_utc, job_end_utc)
+
+                        if overlap_end > overlap_start:
+                            start_seconds = (overlap_start - video_start_utc).total_seconds()
+                            end_seconds = (overlap_end - video_start_utc).total_seconds()
+                        else:
+                            # No overlap; skip this video
+                            continue
+                except Exception:
+                    # If overlap computation fails, fall back to processing full selected file.
+                    start_seconds = None
+                    end_seconds = None
+
                 def _on_batch_video_progress(frames_read: int, frames_total: int, _pf=pair_flat):
                     if frames_total and frames_total > 0:
                         segment = frames_read / frames_total
@@ -278,6 +317,8 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
                     camera_id=camera_id,
                     video_path=video_path,
                     video_progress_callback=_on_batch_video_progress,
+                    start_seconds=start_seconds,
+                    end_seconds=end_seconds,
                 )
 
                 # Add video and query image info to results

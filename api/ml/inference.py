@@ -56,7 +56,8 @@ def extract_embedding(image, model, transform_func, device):
 
 def process_video_data(video_data, yolo_model, reid_model, transform_func, device,
                        query_embedding, threshold, frame_skip, detection_id=None, camera_id=None,
-                       video_path=None, video_progress_callback=None):
+                       video_path=None, video_progress_callback=None,
+                       start_seconds=None, end_seconds=None):
     """
     Process a video and return matches against the query embedding.
 
@@ -79,6 +80,10 @@ def process_video_data(video_data, yolo_model, reid_model, transform_func, devic
                                   Invoked as the decoder advances through the file (throttled);
                                   frames_read is 1-based count of successfully read frames;
                                   frames_total is from the container (may be 0 if unknown).
+        start_seconds: Optional float. If provided, seek to this offset (in seconds) from the
+                       beginning of the video before processing.
+        end_seconds:   Optional float. If provided, stop processing when the decode timestamp
+                       reaches this offset (in seconds) from the beginning of the video.
 
     Returns:
         List of match dicts {time, match_percent, box, frame_id, frame_image, ...}.
@@ -123,6 +128,49 @@ def process_video_data(video_data, yolo_model, reid_model, transform_func, devic
         results = []
         frame_id = 0
         processed_frames = 0
+        # Track a logical segment for progress reporting when trimming is enabled.
+        seg_start_frame = 0
+        seg_total_frames = total_frames if total_frames > 0 else 0
+
+        # -------------------------------------------------------------- #
+        # Optional trim: seek to start_seconds and cap at end_seconds     #
+        # -------------------------------------------------------------- #
+        try:
+            if start_seconds is not None:
+                start_s = float(start_seconds)
+                if start_s > 0:
+                    # OpenCV seek is best-effort and codec-dependent.
+                    video.set(cv2.CAP_PROP_POS_MSEC, start_s * 1000.0)
+            if end_seconds is not None:
+                end_s = float(end_seconds)
+                if end_s < 0:
+                    end_s = None
+        except Exception:
+            # If anything goes wrong, fall back to full decode.
+            start_s = None
+            end_s = None
+
+        # Determine segment frame bounds (for progress) from effective seek position.
+        try:
+            pos_frame = int(video.get(cv2.CAP_PROP_POS_FRAMES))
+            # CAP_PROP_POS_FRAMES can be 0 even after set() for some formats; still safe.
+            frame_id = max(0, pos_frame)
+            seg_start_frame = frame_id
+        except Exception:
+            seg_start_frame = frame_id
+
+        if end_seconds is not None:
+            try:
+                end_s = float(end_seconds)
+                if end_s > 0 and fps > 0:
+                    seg_end_frame = int(end_s * fps)
+                    if total_frames > 0:
+                        seg_end_frame = min(seg_end_frame, total_frames)
+                    seg_total_frames = max(0, seg_end_frame - seg_start_frame)
+                else:
+                    seg_total_frames = total_frames if total_frames > 0 else 0
+            except Exception:
+                seg_total_frames = total_frames if total_frames > 0 else 0
 
         # Throttle DB/API progress updates (~few Hz) while still reflecting real decode position.
         _prog_last_t = [0.0]
@@ -132,8 +180,9 @@ def process_video_data(video_data, yolo_model, reid_model, transform_func, devic
             if video_progress_callback is None:
                 return
             now = time.monotonic()
-            if total_frames > 0:
-                bucket = int(100 * frames_read / total_frames)
+            denom = seg_total_frames if seg_total_frames and seg_total_frames > 0 else (total_frames if total_frames > 0 else 0)
+            if denom > 0:
+                bucket = int(100 * frames_read / denom)
             else:
                 bucket = frames_read // 30
             if (
@@ -144,7 +193,9 @@ def process_video_data(video_data, yolo_model, reid_model, transform_func, devic
                 return
             _prog_last_t[0] = now
             _prog_last_bucket[0] = bucket
-            video_progress_callback(frames_read, total_frames)
+            # Report segment-based progress if trimming is enabled.
+            frames_total_out = denom if denom > 0 else total_frames
+            video_progress_callback(frames_read, frames_total_out)
 
         current_app.logger.info(
             f"Starting video processing: {total_frames} total frames, "
@@ -157,7 +208,16 @@ def process_video_data(video_data, yolo_model, reid_model, transform_func, devic
                 break
 
             frame_id += 1
-            _emit_progress(frame_id, force=False)
+            # If trimming is enabled, stop once we reach the requested end timestamp.
+            if end_seconds is not None and fps > 0:
+                try:
+                    if (frame_id / fps) >= float(end_seconds):
+                        break
+                except Exception:
+                    pass
+
+            seg_frames_read = max(0, frame_id - seg_start_frame)
+            _emit_progress(seg_frames_read, force=False)
 
             # Skip frames based on frame_skip parameter
             if frame_id % frame_skip != 0:
@@ -262,7 +322,8 @@ def process_video_data(video_data, yolo_model, reid_model, transform_func, devic
                 continue
 
         if frame_id > 0:
-            _emit_progress(frame_id, force=True)
+            seg_frames_read = max(0, frame_id - seg_start_frame)
+            _emit_progress(seg_frames_read, force=True)
 
         current_app.logger.info(
             f"Video processing complete: processed {processed_frames} frames, "
