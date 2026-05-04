@@ -54,217 +54,228 @@ def extract_embedding(image, model, transform_func, device):
 
 
 def process_video_data(video_data, yolo_model, reid_model, transform_func, device,
-                       query_embedding, threshold, frame_skip, detection_id=None, camera_id=None):
+                       query_embedding, threshold, frame_skip, detection_id=None, camera_id=None,
+                       video_path=None):
     """
-    Process video bytes and return matches.
-    
-    If detection_id and camera_id provided, also stores vehicle detections for cross-camera tracking.
-    
+    Process a video and return matches against the query embedding.
+
+    Accepts either a *video_path* (preferred – avoids a RAM copy) or legacy
+    *video_data* bytes (written to a temp file for backward-compatibility).
+
     Args:
-        video_data: Raw video file bytes
-        yolo_model: YOLO detection model
-        reid_model: ReID embedding model
-        transform_func: Image transformation function
-        device: torch device
-        query_embedding: Reference embedding to match against
-        threshold: Similarity threshold (0-100 percent)
-        frame_skip: Process every Nth frame
-        detection_id: Optional detection ID to associate vehicles
-        camera_id: Optional camera ID for cross-camera tracking
-    
+        video_data:      Raw video bytes OR None when video_path is given.
+        yolo_model:      YOLO detection model.
+        reid_model:      ReID embedding model.
+        transform_func:  Image transformation function.
+        device:          torch device.
+        query_embedding: Reference embedding to match against.
+        threshold:       Similarity threshold (0-100 percent).
+        frame_skip:      Process every Nth frame.
+        detection_id:    Optional detection ID for cross-camera tracking.
+        camera_id:       Optional camera ID for cross-camera tracking.
+        video_path:      Direct path to the video file (preferred over video_data).
+
     Returns:
-        List of match results (dicts with time, match_percent, box, optional track_id)
-    
-    Raises:
-        ValueError: If video file cannot be opened
-        Exception: If any error occurs during processing
+        List of match dicts {time, match_percent, box, frame_id, frame_image, ...}.
     """
     # Import here to avoid circular imports
     from ..tracking.store import store_vehicle_detection
     from ..tracking.correlate import correlate_vehicle_detections
-    
-    # Save video to temp location
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp:
-        tmp.write(video_data)
-        tmp_path = tmp.name
-    
+
+    # ------------------------------------------------------------------ #
+    # Resolve the path to the video file                                   #
+    # ------------------------------------------------------------------ #
+    tmp_path = None          # only set when we created a temp file
+    cleanup_tmp = False
+
+    if video_path and os.path.exists(video_path):
+        # Preferred: use the file on disk directly – no RAM copy needed
+        source_path = video_path
+    else:
+        # Legacy fallback: caller passed raw bytes; write to a temp file
+        if not video_data:
+            raise ValueError("Either video_path or video_data must be provided")
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp:
+            tmp.write(video_data)
+            tmp_path = tmp.name
+        source_path = tmp_path
+        cleanup_tmp = True
+
     video = None
-    stored_detections = []  # Store detection IDs for optional batch correlation
-    
+    # Accumulate detections for batch DB correlation at the end
+    pending_correlations = []
+
     try:
-        video = cv2.VideoCapture(tmp_path)
+        video = cv2.VideoCapture(source_path)
         if not video.isOpened():
             raise ValueError("Could not open video file")
-        
+
         fps = video.get(cv2.CAP_PROP_FPS)
         if fps <= 0:
-            fps = 30  # Default fallback if FPS cannot be read
-        
+            fps = 24  # Default fallback if FPS cannot be read
+
         total_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
         results = []
         frame_id = 0
         processed_frames = 0
-        
-        # Log processing start
-        current_app.logger.info(f"Starting video processing: {total_frames} total frames, skipping every {frame_skip} frames")
-        
+
+        current_app.logger.info(
+            f"Starting video processing: {total_frames} total frames, "
+            f"skipping every {frame_skip} frames"
+        )
+
         while True:
             ret, frame = video.read()
             if not ret or frame is None:
                 break
-            
+
             frame_id += 1
-            
+
             # Skip frames based on frame_skip parameter
             if frame_id % frame_skip != 0:
                 continue
-            
+
             processed_frames += 1
-            
+
             try:
-                # Get original frame dimensions
                 h, w = frame.shape[:2]
-                
+
                 # Resize frame for YOLO processing
                 small_frame = cv2.resize(frame, (MODEL_CONFIG['YOLO_IMGSZ'], MODEL_CONFIG['YOLO_IMGSZ']))
-                
+
                 # Run YOLO detection
                 detections = yolo_model(small_frame, imgsz=MODEL_CONFIG['YOLO_IMGSZ'], verbose=False)[0]
-                
-                # Process each detection
+
+                # -------------------------------------------------------- #
+                # Collect all valid vehicle crops for this frame            #
+                # -------------------------------------------------------- #
+                frame_crops = []   # (vehicle_crop_bgr, box_coords)
+
                 for box in detections.boxes:
                     cls = int(box.cls[0])
-                    
-                    # Filter for vehicle classes only
                     if cls not in MODEL_CONFIG['VEHICLE_CLASSES']:
                         continue
-                    
-                    # Get bounding box coordinates
+
                     coords = box.xyxy[0].cpu().numpy()
                     x1, y1, x2, y2 = coords
-                    
+
                     # Scale coordinates back to original frame size
                     x1 = int(x1 * w / MODEL_CONFIG['YOLO_IMGSZ'])
                     x2 = int(x2 * w / MODEL_CONFIG['YOLO_IMGSZ'])
                     y1 = int(y1 * h / MODEL_CONFIG['YOLO_IMGSZ'])
                     y2 = int(y2 * h / MODEL_CONFIG['YOLO_IMGSZ'])
-                    
-                    # Ensure coordinates are within frame bounds
+
+                    # Clamp to frame bounds
                     x1 = max(0, min(x1, w - 1))
                     x2 = max(0, min(x2, w - 1))
                     y1 = max(0, min(y1, h - 1))
                     y2 = max(0, min(y2, h - 1))
-                    
-                    # Skip invalid boxes
+
                     if x2 <= x1 or y2 <= y1:
                         continue
-                    
-                    # Filter out boxes that are too small
+
                     box_area = (x2 - x1) * (y2 - y1)
-                    min_box_area = MODEL_CONFIG.get('MIN_BOX_AREA', 1000)
-                    if box_area < min_box_area:
+                    if box_area < MODEL_CONFIG.get('MIN_BOX_AREA', 1000):
                         continue
-                    
-                    # Extract vehicle crop
+
                     vehicle_crop = frame[y1:y2, x1:x2]
                     if vehicle_crop is None or vehicle_crop.size == 0:
                         continue
-                    
-                    # Convert BGR to RGB for ReID model
-                    vehicle_crop_rgb = cv2.cvtColor(vehicle_crop, cv2.COLOR_BGR2RGB)
-                    
-                    # Extract embedding
-                    vehicle_embedding = extract_embedding(vehicle_crop_rgb, reid_model, transform_func, device)
-                    
-                    # Calculate similarity with query
+
+                    frame_crops.append((vehicle_crop, (x1, y1, x2, y2)))
+
+                if not frame_crops:
+                    continue
+
+                # -------------------------------------------------------- #
+                # Batch ReID inference for all crops in this frame          #
+                # One forward pass instead of N separate calls              #
+                # -------------------------------------------------------- #
+                rgb_crops = [
+                    cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                    for crop, _ in frame_crops
+                ]
+                vehicle_embeddings = batch_extract_embeddings(
+                    rgb_crops, reid_model, transform_func, device
+                )
+
+                timestamp = frame_id / fps
+
+                for (vehicle_crop, (x1, y1, x2, y2)), vehicle_embedding in zip(frame_crops, vehicle_embeddings):
                     similarity = cosine_similarity(query_embedding, vehicle_embedding) * 100
-                    
-                    # Check if match meets threshold
-                    if similarity > threshold:
-                        timestamp = frame_id / fps if fps > 0 else 0
 
-                        # Encode the vehicle crop as base64 for downstream display
-                        frame_image = _encode_frame_as_base64(vehicle_crop)
+                    if similarity <= threshold:
+                        continue
 
-                        result = {
-                            'time': round(timestamp, 2),
-                            'match_percent': round(similarity, 2),
-                            'box': {'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2},
-                            'frame_id': frame_id,
-                            'frame_image': frame_image,  # base64 JPEG data-URI of the vehicle crop
-                        }
-                        
-                        # Store vehicle detection for cross-camera tracking
-                        if detection_id and camera_id:
-                            try:
-                                # Store detection in database
-                                vehicle_det_id = store_vehicle_detection(
-                                    detection_id=detection_id,
-                                    camera_id=camera_id,
-                                    timestamp=timestamp,
-                                    box=result['box'],
-                                    embedding=vehicle_embedding.tolist(),  # Convert numpy array to list for JSON storage
-                                    match_score=similarity
-                                )
-                                
-                                # Store for potential batch correlation
-                                stored_detections.append({
-                                    'detection_id': vehicle_det_id,
-                                    'camera_id': camera_id,
-                                    'timestamp': timestamp,
-                                    'embedding': vehicle_embedding,
-                                    'result_index': len(results)
-                                })
-                                
-                                # Optionally correlate immediately (or do batch at end)
-                                track_id = correlate_vehicle_detections(
-                                    vehicle_det_id, camera_id, timestamp, vehicle_embedding
-                                )
-                                
-                                if track_id:
-                                    result['track_id'] = track_id
-                                    
-                            except Exception as e:
-                                current_app.logger.warning(f"Error storing vehicle detection: {str(e)}")
-                        
-                        results.append(result)
-                        
+                    frame_image = _encode_frame_as_base64(vehicle_crop)
+
+                    result = {
+                        'time': round(timestamp, 2),
+                        'match_percent': round(similarity, 2),
+                        'box': {'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2},
+                        'frame_id': frame_id,
+                        'frame_image': frame_image,
+                    }
+
+                    # Queue detection for batch DB correlation after the loop
+                    if detection_id and camera_id:
+                        pending_correlations.append({
+                            'vehicle_embedding': vehicle_embedding,
+                            'timestamp': timestamp,
+                            'box': result['box'],
+                            'match_score': similarity,
+                            'result_index': len(results),
+                        })
+
+                    results.append(result)
+
             except Exception as e:
                 current_app.logger.error(f"Error processing frame {frame_id}: {str(e)}")
-                continue  # Continue with next frame on error
-        
-        # Log completion
-        current_app.logger.info(f"Video processing complete: processed {processed_frames} frames, found {len(results)} matches")
-        
-        # Batch correlate remaining detections if needed (optional)
-        if detection_id and camera_id and stored_detections:
+                continue
+
+        current_app.logger.info(
+            f"Video processing complete: processed {processed_frames} frames, "
+            f"found {len(results)} matches"
+        )
+
+        # ---------------------------------------------------------------- #
+        # Batch DB correlation — done once after the main loop             #
+        # ---------------------------------------------------------------- #
+        if detection_id and camera_id and pending_correlations:
             try:
-                # Optional: batch correlation for any missed matches
-                for det in stored_detections:
-                    if 'track_id' not in results[det['result_index']]:
-                        track_id = correlate_vehicle_detections(
-                            det['detection_id'], det['camera_id'], det['timestamp'], det['embedding']
-                        )
-                        if track_id:
-                            results[det['result_index']]['track_id'] = track_id
+                for item in pending_correlations:
+                    vehicle_det_id = store_vehicle_detection(
+                        detection_id=detection_id,
+                        camera_id=camera_id,
+                        timestamp=item['timestamp'],
+                        box=item['box'],
+                        embedding=item['vehicle_embedding'].tolist(),
+                        match_score=item['match_score'],
+                    )
+                    track_id = correlate_vehicle_detections(
+                        vehicle_det_id, camera_id,
+                        item['timestamp'], item['vehicle_embedding']
+                    )
+                    if track_id:
+                        results[item['result_index']]['track_id'] = track_id
             except Exception as e:
                 current_app.logger.warning(f"Error in batch correlation: {str(e)}")
-        
+
         return results
-    
+
     except Exception as e:
         current_app.logger.error(f"Video processing failed: {str(e)}")
         raise
-    
+
     finally:
-        # Clean up resources
         if video:
             video.release()
-        if os.path.exists(tmp_path):
+        if cleanup_tmp and tmp_path and os.path.exists(tmp_path):
             try:
                 os.remove(tmp_path)
             except Exception as e:
                 current_app.logger.warning(f"Could not remove temp file {tmp_path}: {str(e)}")
+
 
 
 def process_image_for_matching(image_bytes, yolo_model, reid_model, transform_func, device):

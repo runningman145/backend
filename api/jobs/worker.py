@@ -76,34 +76,37 @@ def process_job(job):
 def process_single_job(job, db, upload_folder, yolo_model, reid_model, transform_func, device):
     """Process a legacy single video job."""
     job_id = job['id']
-    
+
     video_path = os.path.join(upload_folder, job['video_filename'])
     query_image_path = os.path.join(upload_folder, job['query_image_filename'])
-    
+
     if not os.path.exists(video_path) or not os.path.exists(query_image_path):
-        raise FileNotFoundError(f"Video or image file not found")
-    
-    # Read files
-    with open(video_path, 'rb') as f:
-        video_data = f.read()
-    
+        raise FileNotFoundError("Video or image file not found")
+
     query_image = cv2.imread(query_image_path)
-    
     if query_image is None:
         raise ValueError("Could not read query image")
-    
-    # Process video
+
     query_image_rgb = cv2.cvtColor(query_image, cv2.COLOR_BGR2RGB)
     query_embedding = extract_embedding(
         query_image_rgb, reid_model, transform_func, device
     )
-    
+
+    # Pass video_path directly — no need to read the whole file into RAM
     results = process_video_data(
-        video_data, yolo_model, reid_model, transform_func, device,
-        query_embedding, job['threshold'], job['frame_skip'],
-        job['detection_id'], job['camera_id']
+        video_data=None,
+        yolo_model=yolo_model,
+        reid_model=reid_model,
+        transform_func=transform_func,
+        device=device,
+        query_embedding=query_embedding,
+        threshold=job['threshold'],
+        frame_skip=job['frame_skip'],
+        detection_id=job['detection_id'],
+        camera_id=job['camera_id'],
+        video_path=video_path,
     )
-    
+
     # Store detection matches in database (frame_image is not a DB column – strip it)
     for result in results:
         db.execute(
@@ -112,9 +115,8 @@ def process_single_job(job, db, upload_folder, yolo_model, reid_model, transform
         )
     db.commit()
 
-    # Mark job as completed with full results including frame_image for display
     result_data = json.dumps({
-        'matches': results,           # frame_image is preserved here
+        'matches': results,
         'total_matches': len(results),
     })
     update_job_status(job_id, 'completed', result_data=result_data)
@@ -211,13 +213,19 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
                 continue
 
             try:
-                with open(video_path, 'rb') as f:
-                    video_data = f.read()
-
+                # Pass path directly — avoids loading the whole video into RAM
                 results = process_video_data(
-                    video_data, yolo_model, reid_model, transform_func, device,
-                    query_embedding, threshold, frame_skip,
-                    None, camera_id  # No single detection_id for batch jobs
+                    video_data=None,
+                    yolo_model=yolo_model,
+                    reid_model=reid_model,
+                    transform_func=transform_func,
+                    device=device,
+                    query_embedding=query_embedding,
+                    threshold=threshold,
+                    frame_skip=frame_skip,
+                    detection_id=None,
+                    camera_id=camera_id,
+                    video_path=video_path,
                 )
 
                 # Add video and query image info to results
