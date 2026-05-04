@@ -60,7 +60,6 @@ def get_camera(camera_id):
     camera = _get_or_404(camera_id)
     return jsonify(_serialize(camera))
 
-
 @bp.route('/<camera_id>', methods=['PUT'])
 def update_camera(camera_id):
     """Update name, latitude, longitude, and/or status of a camera."""
@@ -109,6 +108,16 @@ def delete_camera(camera_id):
 
     return '', 204
 
+@bp.route('/<camera_id>/videos/<video_id>', methods=['DELETE'])
+def delete_camera_video(camera_id, video_id):
+    """Delete a particular video from a camera."""
+    _get_or_404(camera_id)
+
+    db = get_db()
+    db.execute('DELETE FROM videos WHERE id = ? AND camera_id = ?', (video_id, camera_id))
+    db.commit()
+
+    return '', 204
 
 @bp.route('/<camera_id>/videos', methods=['GET'])
 def list_camera_videos(camera_id):

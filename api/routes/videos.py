@@ -140,7 +140,6 @@ def list_camera_videos(camera_id):
         current_app.logger.error(f"Error listing camera videos: {str(e)}")
         return jsonify({'error': f'Failed to list videos: {str(e)}'}), 500
 
-
 @bp.route('/<video_id>/metadata', methods=['GET'])
 def get_video_metadata_route(video_id):
     """Get metadata for a specific video."""
