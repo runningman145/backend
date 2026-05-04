@@ -135,15 +135,17 @@ def process_video_data(video_data, yolo_model, reid_model, transform_func, devic
         # -------------------------------------------------------------- #
         # Optional trim: seek to start_seconds and cap at end_seconds     #
         # -------------------------------------------------------------- #
+        start_s = None
+        end_s = None
         try:
             if start_seconds is not None:
-                start_s = float(start_seconds)
+                start_s = max(0.0, float(start_seconds))
                 if start_s > 0:
                     # OpenCV seek is best-effort and codec-dependent.
                     video.set(cv2.CAP_PROP_POS_MSEC, start_s * 1000.0)
             if end_seconds is not None:
                 end_s = float(end_seconds)
-                if end_s < 0:
+                if end_s <= 0:
                     end_s = None
         except Exception:
             # If anything goes wrong, fall back to full decode.
@@ -209,9 +211,12 @@ def process_video_data(video_data, yolo_model, reid_model, transform_func, devic
 
             frame_id += 1
             # If trimming is enabled, stop once we reach the requested end timestamp.
-            if end_seconds is not None and fps > 0:
+            # Use decoder-reported timestamp for robustness across frame counter quirks.
+            if end_s is not None:
                 try:
-                    if (frame_id / fps) >= float(end_seconds):
+                    current_pos_ms = video.get(cv2.CAP_PROP_POS_MSEC)
+                    current_pos_s = (current_pos_ms / 1000.0) if current_pos_ms and current_pos_ms > 0 else (frame_id / fps if fps > 0 else 0.0)
+                    if current_pos_s >= end_s:
                         break
                 except Exception:
                     pass

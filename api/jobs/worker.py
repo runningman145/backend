@@ -5,7 +5,6 @@ Processes video detection jobs from the queue.
 import os
 import json
 import cv2
-import numpy as np
 from datetime import datetime, timedelta
 from flask import current_app
 from ..db import get_db
@@ -187,6 +186,7 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
     # 2. SUBSTR(..., 1, 19) to strip timezone info (e.g., +00:00)
     query = '''
         SELECT id, filename, SUBSTR(REPLACE(captured_at, 'T', ' '), 1, 19) as captured_at_utc
+        FROM videos
         WHERE camera_id = ?
         AND SUBSTR(REPLACE(captured_at, 'T', ' '), 1, 19) >= ?
         AND SUBSTR(REPLACE(captured_at, 'T', ' '), 1, 19) <= ?
@@ -254,36 +254,24 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
                 # Trim within the selected video based on overlap           #
                 # -------------------------------------------------------- #
                 # videos.captured_at is treated as the video's start time in UTC.
-                # We'll process only the overlap between:
-                #   [video_start, video_start + duration] and [job_start, job_end]
+                # Compute offsets directly against the requested job window.
+                # This avoids relying on duration metadata (which may be missing
+                # for some containers/codecs and would otherwise disable trimming).
                 start_seconds = None
                 end_seconds = None
                 try:
                     video_start_utc = datetime.strptime(video['captured_at_utc'], '%Y-%m-%d %H:%M:%S')
                     job_start_utc = datetime.strptime(start_datetime_utc, '%Y-%m-%d %H:%M:%S')
                     job_end_utc = datetime.strptime(end_datetime_utc, '%Y-%m-%d %H:%M:%S')
-
-                    # Read duration from the actual file (fast; no full decode)
-                    cap = cv2.VideoCapture(video_path)
-                    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
-                    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0
-                    cap.release()
-
-                    duration_s = 0.0
-                    if fps and fps > 0 and frame_count and frame_count > 0:
-                        duration_s = float(frame_count) / float(fps)
-
-                    if duration_s and duration_s > 0:
-                        video_end_utc = video_start_utc + timedelta(seconds=duration_s)
-                        overlap_start = max(video_start_utc, job_start_utc)
-                        overlap_end = min(video_end_utc, job_end_utc)
-
-                        if overlap_end > overlap_start:
-                            start_seconds = (overlap_start - video_start_utc).total_seconds()
-                            end_seconds = (overlap_end - video_start_utc).total_seconds()
-                        else:
-                            # No overlap; skip this video
-                            continue
+                    start_seconds = max(0.0, (job_start_utc - video_start_utc).total_seconds())
+                    end_seconds = (job_end_utc - video_start_utc).total_seconds()
+                    # If the requested window is entirely before this video start,
+                    # there is no overlap to process.
+                    if end_seconds <= 0:
+                        continue
+                    # If clamping produced an empty interval, skip safely.
+                    if end_seconds <= start_seconds:
+                        continue
                 except Exception:
                     # If overlap computation fails, fall back to processing full selected file.
                     start_seconds = None
