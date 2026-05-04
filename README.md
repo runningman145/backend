@@ -25,6 +25,10 @@ The system enables:
 ### Prerequisites
 - Python 3.8 or higher
 - pip (Python package manager)
+- FFmpeg (for video processing and streaming)
+  - **Windows**: Download from [ffmpeg.org](https://ffmpeg.org/download.html) or use `choco install ffmpeg`
+  - **macOS**: `brew install ffmpeg`
+  - **Linux**: `sudo apt-get install ffmpeg` (Debian/Ubuntu) or `sudo yum install ffmpeg` (CentOS/RHEL)
 
 ### Setup Steps
 
