@@ -6,12 +6,16 @@ import os
 import json
 import cv2
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import current_app
 from ..db import get_db
 from ..ml.loader import get_models
 from ..ml.inference import extract_embedding, process_video_data
 from .models import update_job_status
+
+# Define timezone offset for Uganda (EAT = UTC+3)
+# Job times come in local timezone, but videos are stored in UTC
+TIMEZONE_OFFSET = timedelta(hours=3)
 
 
 def _is_cancelled(job_id):
@@ -158,6 +162,25 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
     start_datetime = f"{job_date} {start_time}"
     end_datetime = f"{job_date} {end_time}"
     
+    # Convert local times (EAT) to UTC for database query
+    # The job times are in local timezone (EAT, UTC+3), but captured_at in DB is UTC
+    # So we need to subtract the timezone offset to get UTC equivalents
+    try:
+        start_dt = datetime.strptime(start_datetime, '%Y-%m-%d %H:%M:%S')
+        end_dt = datetime.strptime(end_datetime, '%Y-%m-%d %H:%M:%S')
+        
+        # Convert local times to UTC by subtracting the offset
+        start_dt_utc = start_dt - TIMEZONE_OFFSET
+        end_dt_utc = end_dt - TIMEZONE_OFFSET
+        
+        start_datetime_utc = start_dt_utc.strftime('%Y-%m-%d %H:%M:%S')
+        end_datetime_utc = end_dt_utc.strftime('%Y-%m-%d %H:%M:%S')
+        
+        current_app.logger.info(f"Job {job_id}: Converting {start_datetime} EAT to {start_datetime_utc} UTC")
+    except ValueError as e:
+        current_app.logger.error(f"Job {job_id}: Failed to parse datetime: {e}")
+        raise
+    
     # Get videos for the specified camera, date, and time range.
     # Normalize captured_at to "YYYY-MM-DD HH:MM:SS" format by:
     # 1. REPLACE('T', ' ') to handle ISO-8601 format
@@ -169,7 +192,7 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
         AND SUBSTR(REPLACE(captured_at, 'T', ' '), 1, 19) <= ?
         ORDER BY captured_at
     '''
-    videos = db.execute(query, (camera_id, start_datetime, end_datetime)).fetchall()
+    videos = db.execute(query, (camera_id, start_datetime_utc, end_datetime_utc)).fetchall()
     
     if not videos:
         # Log more details for debugging
@@ -177,9 +200,10 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
             'SELECT filename, SUBSTR(REPLACE(captured_at, \'T\', \' \'), 1, 19) as captured_at FROM videos WHERE camera_id = ? ORDER BY captured_at DESC LIMIT 5',
             (camera_id,)
         ).fetchall()
-        current_app.logger.warning(f"Looking for videos between {start_datetime} and {end_datetime}")
+        current_app.logger.warning(f"Looking for videos between {start_datetime_utc} and {end_datetime_utc} (UTC)")
+        current_app.logger.warning(f"Job requested: {start_datetime} to {end_datetime} (local EAT)")
         current_app.logger.warning(f"Recent videos for camera {camera_id}: {[dict(v) for v in all_videos]}")
-        raise ValueError(f"No videos found for camera {camera_id} between {start_datetime} and {end_datetime}")
+        raise ValueError(f"No videos found for camera {camera_id} between {start_datetime_utc} and {end_datetime_utc} UTC")
     
     all_results = []
     num_queries = len(query_images)
