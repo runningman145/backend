@@ -17,6 +17,8 @@ def create_app(test_config=None):
         SECRET_KEY='dev',
         DATABASE=os.path.join(app.instance_path, 'system.sqlite'),
         REID_MODEL_PATH=os.getenv('REID_MODEL_PATH'),  # Path to trained ReID model
+        # Full path to ffmpeg.exe when the server process PATH omits it (common under IDEs).
+        FFMPEG_PATH=os.getenv('FFMPEG_PATH') or os.getenv('FFMPEG_BINARY'),
     )
 
     if os.getenv("DATABASE"):

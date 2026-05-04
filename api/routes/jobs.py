@@ -19,10 +19,75 @@ bp = Blueprint('jobs', __name__, url_prefix='/jobs')
 
 
 def _ffmpeg_executable():
-    """Return ffmpeg binary path if available (browser-safe clips need H.264)."""
+    """
+    Return ffmpeg binary path if available (browser-safe clips need H.264).
+
+    Resolution order:
+      1. FFMPEG_PATH / FFMPEG_BINARY environment variables (full path to ffmpeg.exe)
+      2. Flask app.config['FFMPEG_PATH']
+      3. shutil.which('ffmpeg' / 'ffmpeg.exe') on the current process PATH
+      4. Common Windows install locations (IDE-started Python often lacks user PATH)
+    """
+    candidates = []
+
+    def _add(p):
+        if not p:
+            return
+        s = str(p).strip().strip('"')
+        if not s:
+            return
+        candidates.append(os.path.normpath(s))
+
+    _add(os.environ.get('FFMPEG_PATH'))
+    _add(os.environ.get('FFMPEG_BINARY'))
+    try:
+        _add(current_app.config.get('FFMPEG_PATH'))
+    except RuntimeError:
+        pass
+
     for name in ('ffmpeg', 'ffmpeg.exe'):
-        path = shutil.which(name)
-        if path:
+        w = shutil.which(name)
+        if w:
+            _add(w)
+
+    if os.name == 'nt':
+        program_files = os.environ.get('ProgramFiles', r'C:\Program Files')
+        program_files_x86 = os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)')
+        local_app = os.environ.get('LOCALAPPDATA', '')
+        _add(os.path.join(program_files, 'ffmpeg', 'bin', 'ffmpeg.exe'))
+        _add(os.path.join(program_files, 'Gyan', 'FFmpeg', 'bin', 'ffmpeg.exe'))
+        _add(os.path.join(program_files_x86, 'ffmpeg', 'bin', 'ffmpeg.exe'))
+        _add(r'C:\ffmpeg\bin\ffmpeg.exe')
+        _add(os.path.join(local_app, 'Microsoft', 'WinGet', 'Links', 'ffmpeg.exe'))
+        choco_bin = os.path.join(
+            os.environ.get('ChocolateyInstall', r'C:\ProgramData\chocolatey'),
+            'bin',
+            'ffmpeg.exe',
+        )
+        _add(choco_bin)
+
+        pkg_root = os.path.join(local_app, 'Microsoft', 'WinGet', 'Packages')
+        if os.path.isdir(pkg_root):
+            try:
+                for entry in os.scandir(pkg_root):
+                    if not entry.is_dir():
+                        continue
+                    if 'ffmpeg' not in entry.name.lower():
+                        continue
+                    for rel in (
+                        ('bin', 'ffmpeg.exe'),
+                        ('ffmpeg', 'bin', 'ffmpeg.exe'),
+                    ):
+                        _add(os.path.join(entry.path, *rel))
+            except OSError:
+                pass
+
+    seen = set()
+    for path in candidates:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        if os.path.isfile(path):
             return path
     return None
 
@@ -745,8 +810,11 @@ def get_job_match_clip(job_id):
                         os.remove(temp_clip_path)
                     return jsonify({
                         'error': (
-                            'Clip preview requires ffmpeg with libx264 installed on the server '
-                            '(OpenCV mp4 output is not playable in web browsers).'
+                            'Clip preview needs ffmpeg with libx264. The server process could not '
+                            'find ffmpeg.exe. Install FFmpeg for Windows, then either add its bin '
+                            'folder to the system PATH and restart the backend, or set the '
+                            'environment variable FFMPEG_PATH to the full path of ffmpeg.exe '
+                            '(for example C:\\ffmpeg\\bin\\ffmpeg.exe).'
                         )
                     }), 503
                 if not _ffmpeg_transcode_to_browser_mp4(temp_raw_path, temp_clip_path):
