@@ -2,8 +2,9 @@
 Camera management endpoints.
 Handles CRUD operations for cameras.
 """
+import os
 import uuid
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, current_app
 from ..db import get_db
 
 bp = Blueprint('cameras', __name__, url_prefix='/cameras')
@@ -108,16 +109,6 @@ def delete_camera(camera_id):
 
     return '', 204
 
-@bp.route('/<camera_id>/videos/<video_id>', methods=['DELETE'])
-def delete_camera_video(camera_id, video_id):
-    """Delete a particular video from a camera."""
-    _get_or_404(camera_id)
-
-    db = get_db()
-    db.execute('DELETE FROM videos WHERE id = ? AND camera_id = ?', (video_id, camera_id))
-    db.commit()
-
-    return '', 204
 
 @bp.route('/<camera_id>/videos', methods=['GET'])
 def list_camera_videos(camera_id):
@@ -151,6 +142,35 @@ def list_camera_videos(camera_id):
         'limit': limit,
         'offset': offset
     }), 200
+
+
+@bp.route('/<camera_id>/videos/<video_id>', methods=['DELETE'])
+def delete_camera_video(camera_id, video_id):
+    """Delete a specific video from a camera."""
+    _get_or_404(camera_id)
+    
+    db = get_db()
+    video = db.execute(
+        'SELECT id, storage_path FROM videos WHERE id = ? AND camera_id = ?',
+        (video_id, camera_id)
+    ).fetchone()
+    
+    if video is None:
+        from flask import abort
+        abort(404, description=f'Video {video_id} not found for camera {camera_id}')
+    
+    # Delete the file if it exists
+    if video['storage_path'] and os.path.exists(video['storage_path']):
+        try:
+            os.remove(video['storage_path'])
+        except Exception as e:
+            current_app.logger.warning(f"Failed to delete video file {video['storage_path']}: {str(e)}")
+    
+    # Delete from database
+    db.execute('DELETE FROM videos WHERE id = ?', (video_id,))
+    db.commit()
+    
+    return '', 204
 
 
 # ---------- helpers ----------

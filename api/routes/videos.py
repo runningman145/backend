@@ -173,3 +173,31 @@ def list_unprocessed_videos_route():
     except Exception as e:
         current_app.logger.error(f"Error listing unprocessed videos: {str(e)}")
         return jsonify({'error': f'Failed to list videos: {str(e)}'}), 500
+
+@bp.route('/<video_id>', methods=['DELETE'])
+def delete_video(video_id):
+    """Delete a video record and its file from disk."""
+    try:
+        db = get_db()
+        video = db.execute(
+            'SELECT id, storage_path FROM videos WHERE id = ?', (video_id,)
+        ).fetchone()
+
+        if video is None:
+            return jsonify({'error': 'Video not found'}), 404
+
+        # Delete file from disk if it exists
+        if video['storage_path'] and os.path.exists(video['storage_path']):
+            try:
+                os.remove(video['storage_path'])
+            except Exception as e:
+                current_app.logger.warning(f"Could not delete file: {str(e)}")
+
+        db.execute('DELETE FROM videos WHERE id = ?', (video_id,))
+        db.commit()
+
+        return jsonify({'message': 'Video deleted successfully'}), 200
+
+    except Exception as e:
+        current_app.logger.error(f"Error deleting video: {str(e)}")
+        return jsonify({'error': f'Failed to delete video: {str(e)}'}), 500
