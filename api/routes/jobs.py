@@ -4,13 +4,170 @@ Provides endpoints for queuing and monitoring video processing jobs.
 """
 import json
 import csv
+import os
+import shutil
+import subprocess
+import tempfile
 from datetime import datetime
 from io import StringIO, BytesIO
-from flask import Blueprint, jsonify, request, current_app, send_file
+import cv2
+from flask import Blueprint, jsonify, request, current_app, send_file, after_this_request
 from ..jobs import create_job, get_job_status, get_jobs_by_date_and_time
 from ..db import get_db
 
 bp = Blueprint('jobs', __name__, url_prefix='/jobs')
+
+
+def _ffmpeg_executable():
+    """Return ffmpeg binary path if available (browser-safe clips need H.264)."""
+    for name in ('ffmpeg', 'ffmpeg.exe'):
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
+
+
+def _ffmpeg_extract_h264_clip(video_path: str, start_sec: float, duration_sec: float, out_path: str) -> bool:
+    """
+    Cut a segment and encode as H.264 + yuv420p in MP4 with faststart.
+    OpenCV's mp4v/MPEG-4 Part 2 output often will not play in HTML5 <video>.
+    """
+    exe = _ffmpeg_executable()
+    if not exe:
+        return False
+    if duration_sec <= 0:
+        return False
+    cmd = [
+        exe,
+        '-y',
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-ss',
+        str(max(0.0, start_sec)),
+        '-i',
+        video_path,
+        '-t',
+        str(duration_sec),
+        '-vf',
+        'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+        '-c:v',
+        'libx264',
+        '-preset',
+        'veryfast',
+        '-crf',
+        '23',
+        '-pix_fmt',
+        'yuv420p',
+        '-movflags',
+        '+faststart',
+        '-an',
+        out_path,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=180,
+            check=False,
+            text=True,
+        )
+        if result.returncode != 0:
+            current_app.logger.warning(
+                'ffmpeg clip failed: %s', (result.stderr or result.stdout or 'unknown')[:500]
+            )
+            return False
+        return os.path.exists(out_path) and os.path.getsize(out_path) > 0
+    except Exception as e:
+        current_app.logger.warning('ffmpeg clip exception: %s', e)
+        return False
+
+
+def _ffmpeg_transcode_to_browser_mp4(src_path: str, out_path: str) -> bool:
+    """Re-encode any video readable by ffmpeg to browser-safe H.264 MP4."""
+    exe = _ffmpeg_executable()
+    if not exe:
+        return False
+    cmd = [
+        exe,
+        '-y',
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-i',
+        src_path,
+        '-vf',
+        'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+        '-c:v',
+        'libx264',
+        '-preset',
+        'veryfast',
+        '-crf',
+        '23',
+        '-pix_fmt',
+        'yuv420p',
+        '-movflags',
+        '+faststart',
+        '-an',
+        out_path,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=180,
+            check=False,
+            text=True,
+        )
+        if result.returncode != 0:
+            current_app.logger.warning(
+                'ffmpeg transcode failed: %s',
+                (result.stderr or result.stdout or 'unknown')[:500],
+            )
+            return False
+        return os.path.exists(out_path) and os.path.getsize(out_path) > 0
+    except Exception as e:
+        current_app.logger.warning('ffmpeg transcode exception: %s', e)
+        return False
+
+
+def _opencv_write_raw_clip(
+    video_path: str, clip_start: float, clip_end: float, out_path: str
+) -> int:
+    """Write frames between clip_start and clip_end using OpenCV (any codec). Returns frame count."""
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return 0
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps <= 0:
+        fps = 24.0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if width <= 0 or height <= 0:
+        cap.release()
+        return 0
+    cap.set(cv2.CAP_PROP_POS_MSEC, clip_start * 1000.0)
+    writer = cv2.VideoWriter(
+        out_path,
+        cv2.VideoWriter_fourcc(*'mp4v'),
+        fps,
+        (width, height),
+    )
+    frames_written = 0
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
+            current_sec = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+            if current_sec > clip_end:
+                break
+            writer.write(frame)
+            frames_written += 1
+    finally:
+        cap.release()
+        writer.release()
+    return frames_written
 
 
 @bp.route('', methods=['POST'])
@@ -481,3 +638,156 @@ def get_job_matches(job_id):
     except Exception as e:
         current_app.logger.error(f"Error fetching job matches: {str(e)}")
         return jsonify({'error': f'Failed to fetch matches: {str(e)}'}), 500
+
+
+@bp.route('/<job_id>/results/clip', methods=['GET'])
+def get_job_match_clip(job_id):
+    """
+    Build and return a short MP4 clip around a match timestamp.
+
+    Query params:
+        time: float seconds in source video (required)
+        duration: float clip length in seconds (optional, default=5.0, max=5.0)
+        video_filename: source video filename (optional; required for batch jobs)
+    """
+    temp_clip_path = None
+    try:
+        job = get_job_status(job_id)
+        if job is None:
+            return jsonify({'error': 'Job not found'}), 404
+        if job['status'] != 'completed':
+            return jsonify({
+                'error': f"Clip not available for job in '{job['status']}' status"
+            }), 400
+
+        timestamp = request.args.get('time', type=float)
+        if timestamp is None:
+            return jsonify({'error': 'Query parameter "time" is required'}), 400
+        if timestamp < 0:
+            return jsonify({'error': 'Query parameter "time" must be >= 0'}), 400
+
+        duration = request.args.get('duration', default=5.0, type=float)
+        if duration is None:
+            duration = 5.0
+        duration = max(0.2, min(5.0, duration))
+
+        db = get_db()
+        requested_video_filename = request.args.get('video_filename', type=str)
+        job_row = db.execute(
+            'SELECT video_filename FROM jobs WHERE id = ?',
+            (job_id,)
+        ).fetchone()
+
+        video_filename = requested_video_filename or (job_row['video_filename'] if job_row else None)
+        if not video_filename:
+            return jsonify({'error': 'video_filename is required for this job clip'}), 400
+
+        uploads_dir = os.path.join(current_app.instance_path, 'uploads')
+        video_path = os.path.join(uploads_dir, video_filename)
+        if not os.path.exists(video_path):
+            video_row = db.execute(
+                'SELECT storage_path FROM videos WHERE filename = ? ORDER BY captured_at DESC LIMIT 1',
+                (video_filename,)
+            ).fetchone()
+            if video_row and video_row['storage_path'] and os.path.exists(video_row['storage_path']):
+                video_path = video_row['storage_path']
+            else:
+                return jsonify({'error': f'Video file not found: {video_filename}'}), 404
+
+        cap_probe = cv2.VideoCapture(video_path)
+        if not cap_probe.isOpened():
+            return jsonify({'error': 'Could not open source video'}), 500
+
+        fps = cap_probe.get(cv2.CAP_PROP_FPS)
+        if fps <= 0:
+            fps = 24.0
+
+        width = int(cap_probe.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap_probe.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if width <= 0 or height <= 0:
+            cap_probe.release()
+            return jsonify({'error': 'Invalid source video dimensions'}), 500
+
+        total_frames = int(cap_probe.get(cv2.CAP_PROP_FRAME_COUNT))
+        total_seconds = (total_frames / fps) if total_frames > 0 else None
+        cap_probe.release()
+
+        clip_start = max(0.0, timestamp - (duration / 2.0))
+        clip_end = clip_start + duration
+        if total_seconds is not None and total_seconds > 0:
+            clip_end = min(clip_end, total_seconds)
+            if clip_end <= clip_start:
+                clip_start = max(0.0, clip_end - duration)
+
+        clip_span = clip_end - clip_start
+        if clip_span <= 0:
+            return jsonify({'error': 'Could not build clip at this timestamp'}), 404
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp_clip:
+            temp_clip_path = tmp_clip.name
+
+        ok_ffmpeg = _ffmpeg_extract_h264_clip(video_path, clip_start, clip_span, temp_clip_path)
+
+        if not ok_ffmpeg:
+            raw_suffix = '_raw.mp4'
+            with tempfile.NamedTemporaryFile(delete=False, suffix=raw_suffix) as tmp_raw:
+                temp_raw_path = tmp_raw.name
+            try:
+                frames_written = _opencv_write_raw_clip(
+                    video_path, clip_start, clip_end, temp_raw_path
+                )
+                if frames_written == 0:
+                    if os.path.exists(temp_clip_path):
+                        os.remove(temp_clip_path)
+                    return jsonify({'error': 'Could not build clip at this timestamp'}), 404
+                if not _ffmpeg_executable():
+                    if os.path.exists(temp_clip_path):
+                        os.remove(temp_clip_path)
+                    return jsonify({
+                        'error': (
+                            'Clip preview requires ffmpeg with libx264 installed on the server '
+                            '(OpenCV mp4 output is not playable in web browsers).'
+                        )
+                    }), 503
+                if not _ffmpeg_transcode_to_browser_mp4(temp_raw_path, temp_clip_path):
+                    if os.path.exists(temp_clip_path):
+                        os.remove(temp_clip_path)
+                    return jsonify({
+                        'error': 'Could not encode clip for browser playback (ffmpeg libx264 failed).'
+                    }), 500
+            finally:
+                if os.path.exists(temp_raw_path):
+                    try:
+                        os.remove(temp_raw_path)
+                    except OSError:
+                        pass
+
+        if not os.path.exists(temp_clip_path) or os.path.getsize(temp_clip_path) == 0:
+            if temp_clip_path and os.path.exists(temp_clip_path):
+                os.remove(temp_clip_path)
+            return jsonify({'error': 'Could not build clip at this timestamp'}), 404
+
+        @after_this_request
+        def _cleanup_temp_clip(response):
+            try:
+                if temp_clip_path and os.path.exists(temp_clip_path):
+                    os.remove(temp_clip_path)
+            except Exception:
+                pass
+            return response
+
+        return send_file(
+            temp_clip_path,
+            mimetype='video/mp4',
+            as_attachment=False,
+            download_name=f'job_{job_id}_clip_{int(timestamp)}.mp4'
+        )
+
+    except Exception as e:
+        if temp_clip_path and os.path.exists(temp_clip_path):
+            try:
+                os.remove(temp_clip_path)
+            except Exception:
+                pass
+        current_app.logger.error(f"Error generating job match clip: {str(e)}")
+        return jsonify({'error': f'Failed to generate clip: {str(e)}'}), 500
