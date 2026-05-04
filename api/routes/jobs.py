@@ -190,7 +190,22 @@ def list_jobs():
                     (job_dict['id'],)
                 ).fetchone()
                 job_dict['file_name'] = first['query_image_filename'] if first else 'Batch Job'
-            # Strip the heavy result_data blob from the list view
+            # Expose lightweight in-progress fields; strip heavy result_data (e.g. completed matches).
+            raw_result = job_dict.get('result_data')
+            if raw_result and job_dict.get('status') == 'processing':
+                try:
+                    pdata = json.loads(raw_result)
+                    if isinstance(pdata, dict):
+                        for key in (
+                            'progress_percent',
+                            'frames_total',
+                            'frames_read',
+                            'frames_processed',
+                        ):
+                            if key in pdata and pdata[key] is not None:
+                                job_dict[key] = pdata[key]
+                except (json.JSONDecodeError, TypeError):
+                    pass
             job_dict.pop('result_data', None)
             job_list.append(job_dict)
         

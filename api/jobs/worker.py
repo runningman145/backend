@@ -93,6 +93,13 @@ def process_single_job(job, db, upload_folder, yolo_model, reid_model, transform
     )
 
     # Pass video_path directly — no need to read the whole file into RAM
+    def _on_video_progress(frames_read: int, frames_total: int):
+        update_job_progress(
+            job_id,
+            frames_read=frames_read,
+            frames_total=frames_total,
+        )
+
     results = process_video_data(
         video_data=None,
         yolo_model=yolo_model,
@@ -105,6 +112,7 @@ def process_single_job(job, db, upload_folder, yolo_model, reid_model, transform
         detection_id=job['detection_id'],
         camera_id=job['camera_id'],
         video_path=video_path,
+        video_progress_callback=_on_video_progress,
     )
 
     # Store detection matches in database (frame_image is not a DB column – strip it)
@@ -151,14 +159,14 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
     end_datetime = f"{job_date} {end_time}"
     
     # Get videos for the specified camera, date, and time range.
-    # REPLACE(captured_at, 'T', ' ') normalises ISO-8601 'T'-separator
-    # timestamps (stored by older code) so they compare correctly with
-    # the space-separated datetime strings we build from job_date/time.
+    # Normalize captured_at to "YYYY-MM-DD HH:MM:SS" format by:
+    # 1. REPLACE('T', ' ') to handle ISO-8601 format
+    # 2. SUBSTR(..., 1, 19) to strip timezone info (e.g., +00:00)
     query = '''
         SELECT id, filename FROM videos
         WHERE camera_id = ?
-        AND REPLACE(captured_at, 'T', ' ') >= ?
-        AND REPLACE(captured_at, 'T', ' ') <= ?
+        AND SUBSTR(REPLACE(captured_at, 'T', ' '), 1, 19) >= ?
+        AND SUBSTR(REPLACE(captured_at, 'T', ' '), 1, 19) <= ?
         ORDER BY captured_at
     '''
     videos = db.execute(query, (camera_id, start_datetime, end_datetime)).fetchall()
@@ -166,7 +174,7 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
     if not videos:
         # Log more details for debugging
         all_videos = db.execute(
-            'SELECT filename, REPLACE(captured_at, \'T\', \' \') as captured_at FROM videos WHERE camera_id = ? ORDER BY captured_at DESC LIMIT 5',
+            'SELECT filename, SUBSTR(REPLACE(captured_at, \'T\', \' \'), 1, 19) as captured_at FROM videos WHERE camera_id = ? ORDER BY captured_at DESC LIMIT 5',
             (camera_id,)
         ).fetchall()
         current_app.logger.warning(f"Looking for videos between {start_datetime} and {end_datetime}")
@@ -174,9 +182,12 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
         raise ValueError(f"No videos found for camera {camera_id} between {start_datetime} and {end_datetime}")
     
     all_results = []
-    
+    num_queries = len(query_images)
+    num_videos = len(videos)
+    total_pairs = max(1, num_queries * num_videos)
+
     # Process each query image against all videos
-    for query_image_filename in query_images:
+    for qi, query_image_filename in enumerate(query_images):
         # Check for cancellation before each query image
         if _is_cancelled(job_id):
             current_app.logger.info(f"Job {job_id} cancelled during batch processing")
@@ -200,7 +211,7 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
         )
 
         # Process each video
-        for video in videos:
+        for vi, video in enumerate(videos):
             # Check for cancellation before each video
             if _is_cancelled(job_id):
                 current_app.logger.info(f"Job {job_id} cancelled during batch processing")
@@ -213,6 +224,22 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
                 continue
 
             try:
+                pair_flat = qi * num_videos + vi
+
+                def _on_batch_video_progress(frames_read: int, frames_total: int, _pf=pair_flat):
+                    if frames_total and frames_total > 0:
+                        segment = frames_read / frames_total
+                    else:
+                        segment = min(0.95, frames_read / 30000.0)
+                    overall = 100.0 * (_pf + segment) / total_pairs
+                    overall = min(99.9, overall)
+                    update_job_progress(
+                        job_id,
+                        frames_read=frames_read,
+                        frames_total=frames_total,
+                        progress_percent=overall,
+                    )
+
                 # Pass path directly — avoids loading the whole video into RAM
                 results = process_video_data(
                     video_data=None,
@@ -226,6 +253,7 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
                     detection_id=None,
                     camera_id=camera_id,
                     video_path=video_path,
+                    video_progress_callback=_on_batch_video_progress,
                 )
 
                 # Add video and query image info to results
@@ -249,21 +277,32 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
     update_job_status(job_id, 'completed', result_data=result_data)
 
 
-def update_job_progress(job_id, frames_total, frames_processed):
+def update_job_progress(job_id, frames_read, frames_total, progress_percent=None):
     """
-    Update job progress during processing.
-    
+    Persist in-progress video decode position for the Jobs UI.
+
+    Only updates result_data; does not change status or started_at (safe to call often).
+
     Args:
         job_id: UUID of the job
-        frames_total: Total number of frames in video
-        frames_processed: Number of frames processed so far
+        frames_read: Number of frames successfully decoded so far (video timeline)
+        frames_total: Reported frame count from the container (0 if unknown)
+        progress_percent: Optional precomputed overall percent (e.g. batch jobs spanning
+            multiple videos). When omitted, percent is derived from frames_read / frames_total.
     """
-    progress_percent = (frames_processed / frames_total * 100) if frames_total > 0 else 0
-    
+    if progress_percent is None and frames_total and frames_total > 0:
+        progress_percent = min(100.0, (frames_read / frames_total) * 100)
+
     progress_data = json.dumps({
-        'frames_total': frames_total,
-        'frames_processed': frames_processed,
-        'progress_percent': round(progress_percent, 1),
+        'frames_total': int(frames_total) if frames_total and frames_total > 0 else None,
+        'frames_read': int(frames_read),
+        'frames_processed': int(frames_read),  # legacy key for older clients
+        'progress_percent': round(float(progress_percent), 1) if progress_percent is not None else None,
     })
-    
-    update_job_status(job_id, 'processing', result_data=progress_data)
+
+    db = get_db()
+    db.execute(
+        'UPDATE jobs SET result_data = ? WHERE id = ? AND status = ?',
+        (progress_data, job_id, 'processing'),
+    )
+    db.commit()

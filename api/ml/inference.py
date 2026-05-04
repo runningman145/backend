@@ -6,6 +6,7 @@ import base64
 import cv2
 import numpy as np
 import tempfile
+import time
 import torch
 import os
 from flask import current_app
@@ -55,7 +56,7 @@ def extract_embedding(image, model, transform_func, device):
 
 def process_video_data(video_data, yolo_model, reid_model, transform_func, device,
                        query_embedding, threshold, frame_skip, detection_id=None, camera_id=None,
-                       video_path=None):
+                       video_path=None, video_progress_callback=None):
     """
     Process a video and return matches against the query embedding.
 
@@ -73,7 +74,11 @@ def process_video_data(video_data, yolo_model, reid_model, transform_func, devic
         frame_skip:      Process every Nth frame.
         detection_id:    Optional detection ID for cross-camera tracking.
         camera_id:       Optional camera ID for cross-camera tracking.
-        video_path:      Direct path to the video file (preferred over video_data).
+        video_path:               Direct path to the video file (preferred over video_data).
+        video_progress_callback: Optional callable (frames_read: int, frames_total: int) -> None.
+                                  Invoked as the decoder advances through the file (throttled);
+                                  frames_read is 1-based count of successfully read frames;
+                                  frames_total is from the container (may be 0 if unknown).
 
     Returns:
         List of match dicts {time, match_percent, box, frame_id, frame_image, ...}.
@@ -119,6 +124,28 @@ def process_video_data(video_data, yolo_model, reid_model, transform_func, devic
         frame_id = 0
         processed_frames = 0
 
+        # Throttle DB/API progress updates (~few Hz) while still reflecting real decode position.
+        _prog_last_t = [0.0]
+        _prog_last_bucket = [-1]
+
+        def _emit_progress(frames_read: int, force: bool = False):
+            if video_progress_callback is None:
+                return
+            now = time.monotonic()
+            if total_frames > 0:
+                bucket = int(100 * frames_read / total_frames)
+            else:
+                bucket = frames_read // 30
+            if (
+                not force
+                and (now - _prog_last_t[0]) < 0.45
+                and bucket == _prog_last_bucket[0]
+            ):
+                return
+            _prog_last_t[0] = now
+            _prog_last_bucket[0] = bucket
+            video_progress_callback(frames_read, total_frames)
+
         current_app.logger.info(
             f"Starting video processing: {total_frames} total frames, "
             f"skipping every {frame_skip} frames"
@@ -130,6 +157,7 @@ def process_video_data(video_data, yolo_model, reid_model, transform_func, devic
                 break
 
             frame_id += 1
+            _emit_progress(frame_id, force=False)
 
             # Skip frames based on frame_skip parameter
             if frame_id % frame_skip != 0:
@@ -232,6 +260,9 @@ def process_video_data(video_data, yolo_model, reid_model, transform_func, devic
             except Exception as e:
                 current_app.logger.error(f"Error processing frame {frame_id}: {str(e)}")
                 continue
+
+        if frame_id > 0:
+            _emit_progress(frame_id, force=True)
 
         current_app.logger.info(
             f"Video processing complete: processed {processed_frames} frames, "
