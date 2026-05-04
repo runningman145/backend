@@ -6,6 +6,7 @@
 tests/
 
 _deprecated/
+BACKEND_ARCHITECTURE_EXPLAINED.md
 REFACTORING_SUMMARY.md
 yolov8n.pt
 reid_model.pth
