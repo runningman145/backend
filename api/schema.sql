@@ -1,3 +1,9 @@
+-- Database schema for Vehicle ReID system
+-- Note: If upgrading from an older version and the jobs table already exists,
+-- you may need to run a migration to add the 'cancelled' status to the CHECK constraint.
+-- Migration: ALTER TABLE jobs DROP CONSTRAINT jobs_status_check;
+--            ALTER TABLE jobs ADD CONSTRAINT jobs_status_check CHECK(status IN ('pending', 'processing', 'completed', 'failed', 'cancelled'));
+
 -- a table for cameras in the system
 
 DROP TABLE IF EXISTS detection_matches;
@@ -74,7 +80,7 @@ CREATE TABLE track_detections (
 -- a table for background job queue (video processing jobs)
 CREATE TABLE jobs (
     id TEXT PRIMARY KEY,
-    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'processing', 'completed', 'failed')),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'processing', 'completed', 'failed', 'cancelled')),
     camera_id TEXT NOT NULL,
     detection_id INTEGER,
     video_filename TEXT,

@@ -360,6 +360,159 @@ def cancel_job(job_id):
         return jsonify({'error': f'Failed to cancel job: {str(e)}'}), 500
 
 
+@bp.route('/<job_id>', methods=['DELETE'])
+def delete_job(job_id):
+    """
+    Delete a job and its associated files.
+
+    Can delete jobs in any state. Removes job record from database
+    and cleans up associated upload files if they exist.
+    """
+    try:
+        from ..jobs.models import get_job_query_images
+        
+        db = get_db()
+        job = db.execute(
+            'SELECT id, status, video_filename, query_image_filename FROM jobs WHERE id = ?',
+            (job_id,)
+        ).fetchone()
+
+        if job is None:
+            return jsonify({'error': 'Job not found'}), 404
+
+        # Delete associated files from uploads directory
+        uploads_dir = os.path.join(current_app.instance_path, 'uploads')
+        files_to_delete = []
+        
+        # Add single query image if it exists (for regular jobs)
+        if job['video_filename']:
+            files_to_delete.append(job['video_filename'])
+        if job['query_image_filename']:
+            files_to_delete.append(job['query_image_filename'])
+        
+        # For batch jobs, also get query images from job_query_images table
+        try:
+            batch_query_images = get_job_query_images(job_id)
+            files_to_delete.extend(batch_query_images)
+        except Exception as e:
+            current_app.logger.warning(f"Could not fetch batch query images for job {job_id}: {str(e)}")
+        
+        # Delete all collected files
+        for filename in set(files_to_delete):  # Use set to avoid duplicates
+            if not filename:
+                continue
+            file_path = os.path.join(uploads_dir, filename)
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                    current_app.logger.info(f"Deleted file: {file_path}")
+                except OSError as e:
+                    current_app.logger.warning(f"Could not delete file {file_path}: {str(e)}")
+
+        # Delete the job from database (this cascades to job_query_images due to FK constraint)
+        db.execute('DELETE FROM jobs WHERE id = ?', (job_id,))
+        db.commit()
+
+        current_app.logger.info(f"Job {job_id} deleted by user")
+        return jsonify({'job_id': job_id, 'message': 'Job deleted successfully'}), 200
+
+    except Exception as e:
+        current_app.logger.error(f"Error deleting job: {str(e)}")
+        import traceback
+        current_app.logger.error(traceback.format_exc())
+        return jsonify({'error': f'Failed to delete job: {str(e)}'}), 500
+
+
+@bp.route('/<job_id>/rerun', methods=['POST'])
+def rerun_job(job_id):
+    """
+    Rerun a completed or failed job with the same parameters.
+
+    Creates a new job with the same camera, threshold, frame_skip,
+    and other parameters as the original job. Can rerun jobs in
+    'completed', 'failed', or 'cancelled' states.
+    
+    Handles both regular jobs and batch jobs (with multiple query images).
+    """
+    try:
+        from ..jobs.models import get_job_query_images, create_batch_job, create_job
+        
+        db = get_db()
+        original_job = db.execute(
+            '''SELECT id, camera_id, threshold, frame_skip, video_filename,
+                      query_image_filename, detection_id, job_date, start_time, end_time
+               FROM jobs WHERE id = ?''',
+            (job_id,)
+        ).fetchone()
+
+        if original_job is None:
+            return jsonify({'error': 'Job not found'}), 404
+
+        # Check if this is a batch job (has no video_filename)
+        is_batch_job = original_job['video_filename'] is None
+        
+        if is_batch_job:
+            # For batch jobs, fetch all query images
+            query_images = get_job_query_images(job_id)
+            if not query_images:
+                return jsonify({'error': 'Batch job has no query images to rerun'}), 400
+            
+            # Extract filenames from Row objects - handle both dict-like and tuple access
+            query_image_filenames = []
+            for img in query_images:
+                try:
+                    # Try dictionary-style access first
+                    filename = img['query_image_filename']
+                except (TypeError, KeyError):
+                    try:
+                        # Fall back to tuple-style access (index 0)
+                        filename = img[0]
+                    except (TypeError, IndexError):
+                        current_app.logger.warning(f"Could not extract filename from: {img}")
+                        continue
+                query_image_filenames.append(filename)
+            
+            if not query_image_filenames:
+                return jsonify({'error': 'Could not extract query image filenames'}), 400
+            
+            # Create a new batch job with the same parameters
+            new_job_id = create_batch_job(
+                camera_id=original_job['camera_id'],
+                query_image_filenames=query_image_filenames,
+                threshold=original_job['threshold'],
+                frame_skip=original_job['frame_skip'],
+                job_date=original_job['job_date'],
+                start_time=original_job['start_time'],
+                end_time=original_job['end_time']
+            )
+        else:
+            # For regular jobs, use create_job
+            new_job_id = create_job(
+                camera_id=original_job['camera_id'],
+                detection_id=original_job['detection_id'],
+                video_filename=original_job['video_filename'],
+                query_image_filename=original_job['query_image_filename'],
+                threshold=original_job['threshold'],
+                frame_skip=original_job['frame_skip'],
+                job_date=original_job['job_date'],
+                start_time=original_job['start_time'],
+                end_time=original_job['end_time']
+            )
+
+        current_app.logger.info(f"Job {job_id} rerun as new job {new_job_id}")
+        return jsonify({
+            'new_job_id': new_job_id,
+            'status': 'pending',
+            'message': f'Job rerun successfully. New job ID: {new_job_id}'
+        }), 202
+
+    except Exception as e:
+        current_app.logger.error(f"Error rerunning job: {str(e)}")
+        import traceback
+        current_app.logger.error(traceback.format_exc())
+        return jsonify({'error': f'Failed to rerun job: {str(e)}'}), 500
+
+
 @bp.route('', methods=['GET'])
 def list_jobs():
     """

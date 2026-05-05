@@ -90,7 +90,7 @@ def get_job_query_images(job_id):
         job_id: UUID of the job
     
     Returns:
-        List of query image filenames
+        List of query image filenames as strings
     """
     db = get_db()
     images = db.execute(
@@ -98,7 +98,22 @@ def get_job_query_images(job_id):
         (job_id,)
     ).fetchall()
     
-    return [img['query_image_filename'] for img in images]
+    # Convert Row objects to filenames, handling both dict-like and tuple access
+    filenames = []
+    for img in images:
+        try:
+            # Try dictionary-style access first
+            filename = img['query_image_filename']
+        except (TypeError, KeyError):
+            try:
+                # Fall back to tuple-style access (first column)
+                filename = img[0]
+            except (TypeError, IndexError):
+                continue
+        if filename:
+            filenames.append(filename)
+    
+    return filenames
 
 
 def get_job_status(job_id):
