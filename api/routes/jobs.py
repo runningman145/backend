@@ -759,8 +759,13 @@ def get_job_results_csv(job_id):
 
         # Strip frame_image from every row — it is a large base64 blob that
         # has no value in a CSV and would make the file unreadable.
+        # Also inject camera_id and camera_name to ensure they exist for report generation.
         for row in rows:
             row.pop('frame_image', None)
+            if 'camera_id' not in row and job.get('camera_id'):
+                row['camera_id'] = job['camera_id']
+            if 'camera_name' not in row and job.get('camera_name'):
+                row['camera_name'] = job['camera_name']
         
         if not rows:
             return jsonify({'error': 'No data to export'}), 400

@@ -228,7 +228,7 @@ def _generate_document_signature(data, secret_key=None):
     }
 
 
-def _create_court_ready_pdf(case_metadata, sightings, map_image, signature_info=None):
+def _create_court_ready_pdf(case_metadata, sightings, map_image, signature_info=None, camera_coords=None):
     """
     Create a court-ready PDF report.
 
@@ -315,7 +315,7 @@ def _create_court_ready_pdf(case_metadata, sightings, map_image, signature_info=
     elements.append(Paragraph('VEHICLE SIGHTINGS', heading_style))
     elements.append(Spacer(1, 0.15 * inch))
 
-    sightings_data = [['#', 'Time / Offset', 'Camera ID', 'Location', 'Confidence', 'Officer Notes']]
+    sightings_data = [['#', 'Time / Offset', 'Camera Name', 'Coordinates', 'Confidence', 'Officer Notes']]
     for idx, sighting in enumerate(sightings, 1):
         # timestamp may be a raw seconds float in the flat format
         raw_ts = str(sighting.get('timestamp', ''))
@@ -327,11 +327,19 @@ def _create_court_ready_pdf(case_metadata, sightings, map_image, signature_info=
         except ValueError:
             display_ts = raw_ts[:19]  # ISO timestamp, strip microseconds/Z
 
+        camera_id = sighting.get('camera_id', '')
+        camera_name = sighting.get('camera_name', '')
+        
+        coords = "Unknown"
+        if camera_coords and camera_id in camera_coords:
+            c = camera_coords[camera_id]
+            coords = f"{c['latitude']:.5f}, {c['longitude']:.5f}"
+
         sightings_data.append([
             str(idx),
             display_ts,
-            sighting.get('camera_id', ''),
-            sighting.get('camera_name', ''),
+            camera_name,
+            coords,
             f"{sighting.get('match_score', 0):.1f}%",
             sighting.get('officer_note', '') or sighting.get('officer_notes', ''),
         ])
@@ -489,7 +497,7 @@ def preview_report():
         map_image = _generate_mapbox_map(included, camera_coords) if camera_coords else None
 
         pdf_buffer = _create_court_ready_pdf(
-            case_metadata, included, map_image, signature_info=None
+            case_metadata, included, map_image, signature_info=None, camera_coords=camera_coords
         )
 
         return send_file(
@@ -555,7 +563,7 @@ def generate_report():
         signature_info = _generate_document_signature(signature_data)
 
         pdf_buffer = _create_court_ready_pdf(
-            case_metadata, included_sightings, map_image, signature_info
+            case_metadata, included_sightings, map_image, signature_info, camera_coords
         )
 
         return send_file(

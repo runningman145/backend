@@ -128,7 +128,7 @@ def get_job_status(job_id):
     """
     db = get_db()
     job = db.execute(
-        'SELECT j.id, j.status, j.result_data, j.error_message, j.created_at, j.started_at, j.completed_at, '
+        'SELECT j.id, j.camera_id, j.status, j.result_data, j.error_message, j.created_at, j.started_at, j.completed_at, '
         '       j.query_image_filename, j.job_date, j.start_time, j.end_time, c.name as camera_name '
         'FROM jobs j '
         'LEFT JOIN cameras c ON j.camera_id = c.id '
@@ -148,6 +148,7 @@ def get_job_status(job_id):
         'created_at': job['created_at'],
         'started_at': job['started_at'],
         'completed_at': job['completed_at'],
+        'camera_id': job['camera_id'],
         'camera_name': job['camera_name'],
         'query_image_filename': job['query_image_filename'],
         'query_images': query_images,
