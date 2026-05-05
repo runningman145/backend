@@ -458,20 +458,8 @@ def rerun_job(job_id):
                 return jsonify({'error': 'Batch job has no query images to rerun'}), 400
             
             # Extract filenames from Row objects - handle both dict-like and tuple access
-            query_image_filenames = []
-            for img in query_images:
-                try:
-                    # Try dictionary-style access first
-                    filename = img['query_image_filename']
-                except (TypeError, KeyError):
-                    try:
-                        # Fall back to tuple-style access (index 0)
-                        filename = img[0]
-                    except (TypeError, IndexError):
-                        current_app.logger.warning(f"Could not extract filename from: {img}")
-                        continue
-                query_image_filenames.append(filename)
-            
+            query_image_filenames = query_images
+                        
             if not query_image_filenames:
                 return jsonify({'error': 'Could not extract query image filenames'}), 400
             
