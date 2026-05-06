@@ -15,14 +15,17 @@ def get_vehicle_track(track_id):
     Get all detections in a track with camera info.
     
     Returns:
-        Track details with all vehicle detections
+        Track details with all vehicle detections and sightings for map rendering
     """
     try:
         db = get_db()
         track = db.execute(
-            '''SELECT vt.id, vt.first_seen, vt.last_seen, COUNT(td.id) as detection_count
+            '''SELECT vt.id, vt.first_seen, vt.last_seen, 
+                      COUNT(DISTINCT td.vehicle_detection_id) as detection_count,
+                      COUNT(DISTINCT vd.camera_id) as camera_count
                FROM vehicle_tracks vt
                LEFT JOIN track_detections td ON vt.id = td.track_id
+               LEFT JOIN vehicle_detections vd ON td.vehicle_detection_id = vd.id
                WHERE vt.id = ?
                GROUP BY vt.id''',
             (track_id,)
@@ -48,6 +51,18 @@ def get_vehicle_track(track_id):
             'first_seen': track['first_seen'],
             'last_seen': track['last_seen'],
             'detection_count': track['detection_count'],
+            'camera_count': track['camera_count'],
+            'sightings': [
+                {
+                    'camera_id': d['camera_id'],
+                    'camera_name': d['camera_name'],
+                    'latitude': d['latitude'],
+                    'longitude': d['longitude'],
+                    'timestamp': d['timestamp'],
+                    'confidence': d['match_score'],
+                }
+                for d in detections
+            ],
             'detections': [
                 {
                     'detection_id': d['id'],

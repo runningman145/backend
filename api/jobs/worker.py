@@ -151,6 +151,13 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
     if not query_images:
         raise ValueError("Batch job has no query images")
     
+    detection_cursor = db.execute(
+        'INSERT INTO detections (camera_id) VALUES (?)',
+        (camera_id,)
+    )
+    db.commit()
+    batch_detection_id = detection_cursor.lastrowid
+
     # Construct full datetime strings with seconds for proper comparison
     # If time doesn't have seconds, add :00
     if len(start_time.split(':')) == 2:
@@ -301,7 +308,7 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
                     query_embedding=query_embedding,
                     threshold=threshold,
                     frame_skip=frame_skip,
-                    detection_id=None,
+                    detection_id=batch_detection_id,
                     camera_id=camera_id,
                     video_path=video_path,
                     video_progress_callback=_on_batch_video_progress,
@@ -326,6 +333,7 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
         'total_matches': len(all_results),
         'query_images_count': len(query_images),
         'videos_processed': len(videos),
+        'detection_id': batch_detection_id,
     })
     update_job_status(job_id, 'completed', result_data=result_data)
 
