@@ -35,29 +35,41 @@ def upload_media():
         return jsonify({'error': 'No file part in request'}), 400
     
     file = request.files['file']
-    camera_name = request.form.get('camera_name')
+    camera_id = request.form.get('camera_id')
+    detection_id = request.form.get('detection_id')
     
     if file.filename == '':
         return jsonify({'error': 'No selected file'}), 400
     
-    if not camera_name:
-        return jsonify({'error': 'camera_name is required'}), 400
+    if not camera_id:
+        return jsonify({'error': 'camera_id is required'}), 400
     
-    # Validate file type (images only for query)
+    # Validate file type
     if not allowed_file(file.filename):
         allowed = ', '.join(ALLOWED_EXTENSIONS)
         return jsonify({'error': f'File type not allowed. Allowed: {allowed}'}), 400
     
-    # Look up camera by name
+    # Look up camera by ID
     db = get_db()
     camera = db.execute(
-        'SELECT id FROM cameras WHERE name = ?', (camera_name,)
+        'SELECT id FROM cameras WHERE id = ?', (camera_id,)
     ).fetchone()
     
     if camera is None:
-        return jsonify({'error': f"Camera '{camera_name}' not found"}), 404
+        return jsonify({'error': f"Camera '{camera_id}' not found"}), 404
     
-    camera_id = camera['id']
+    # If detection_id is provided, verify it matches the camera
+    if detection_id:
+        detection = db.execute(
+            'SELECT id, camera_id FROM detections WHERE id = ?',
+            (detection_id,)
+        ).fetchone()
+        
+        if detection is None:
+            return jsonify({'error': f'Detection {detection_id} not found'}), 404
+        
+        if detection['camera_id'] != camera_id:
+            return jsonify({'error': f'Detection {detection_id} does not belong to camera {camera_id}'}), 404
     
     # Save file securely
     filename = secure_filename(file.filename)
@@ -72,16 +84,17 @@ def upload_media():
     except Exception as e:
         return jsonify({'error': f'Failed to save file: {str(e)}'}), 500
     
-    # Create a detection record for this query image
-    try:
-        detection = db.execute(
-            'INSERT INTO detections (camera_id, captured_at) VALUES (?, ?)',
-            (camera_id, datetime.now().isoformat())
-        )
-        db.commit()
-        detection_id = detection.lastrowid
-    except Exception as e:
-        return jsonify({'error': f'Failed to create detection record: {str(e)}'}), 500
+    # Create a detection record if not provided
+    if not detection_id:
+        try:
+            detection = db.execute(
+                'INSERT INTO detections (camera_id) VALUES (?)',
+                (camera_id,)
+            )
+            db.commit()
+            detection_id = detection.lastrowid
+        except Exception as e:
+            return jsonify({'error': f'Failed to create detection record: {str(e)}'}), 500
     
     # Create jobs for all videos from OTHER cameras
     job_ids = []
@@ -115,9 +128,8 @@ def upload_media():
     return jsonify({
         'message': 'Query image uploaded and processing started',
         'filename': filename,
-        'camera_name': camera_name,
         'camera_id': camera_id,
-        'detection_id': detection_id,
+        'detection_id': str(detection_id),
         'upload_path': f'/uploads/{filename}',
         'jobs_created': len(job_ids),
         'jobs': job_ids
