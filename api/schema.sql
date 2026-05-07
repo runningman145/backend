@@ -95,6 +95,7 @@ CREATE TABLE jobs (
     job_date DATE,
     start_time TIME,
     end_time TIME,
+    camera_ids TEXT,
     result_data TEXT,
     error_message TEXT,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
