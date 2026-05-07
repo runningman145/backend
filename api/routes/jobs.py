@@ -427,54 +427,52 @@ def delete_job(job_id):
 def rerun_job(job_id):
     """
     Rerun a completed or failed job with the same parameters.
-
-    Creates a new job with the same camera, threshold, frame_skip,
-    and other parameters as the original job. Can rerun jobs in
-    'completed', 'failed', or 'cancelled' states.
-    
-    Handles both regular jobs and batch jobs (with multiple query images).
+ 
+    Handles both regular jobs and batch jobs (with multiple query images and/or
+    multiple cameras stored in camera_ids JSON).
     """
     try:
         from ..jobs.models import get_job_query_images, create_batch_job, create_job
-        
+        import json as _json
+ 
         db = get_db()
         original_job = db.execute(
-            '''SELECT id, camera_id, threshold, frame_skip, video_filename,
+            '''SELECT id, camera_id, camera_ids, threshold, frame_skip, video_filename,
                       query_image_filename, detection_id, job_date, start_time, end_time
                FROM jobs WHERE id = ?''',
             (job_id,)
         ).fetchone()
-
+ 
         if original_job is None:
             return jsonify({'error': 'Job not found'}), 404
-
-        # Check if this is a batch job (has no video_filename)
+ 
         is_batch_job = original_job['video_filename'] is None
-        
+ 
         if is_batch_job:
-            # For batch jobs, fetch all query images
             query_images = get_job_query_images(job_id)
             if not query_images:
                 return jsonify({'error': 'Batch job has no query images to rerun'}), 400
-            
-            # Extract filenames from Row objects - handle both dict-like and tuple access
-            query_image_filenames = query_images
-                        
-            if not query_image_filenames:
-                return jsonify({'error': 'Could not extract query image filenames'}), 400
-            
-            # Create a new batch job with the same parameters
+ 
+            # Restore camera_ids list if present
+            camera_ids = None
+            raw = original_job['camera_ids'] if 'camera_ids' in original_job.keys() else None
+            if raw:
+                try:
+                    camera_ids = _json.loads(raw)
+                except Exception:
+                    camera_ids = None
+ 
             new_job_id = create_batch_job(
                 camera_id=original_job['camera_id'],
-                query_image_filenames=query_image_filenames,
+                query_image_filenames=query_images,
                 threshold=original_job['threshold'],
                 frame_skip=original_job['frame_skip'],
                 job_date=original_job['job_date'],
                 start_time=original_job['start_time'],
-                end_time=original_job['end_time']
+                end_time=original_job['end_time'],
+                camera_ids=camera_ids,
             )
         else:
-            # For regular jobs, use create_job
             new_job_id = create_job(
                 camera_id=original_job['camera_id'],
                 detection_id=original_job['detection_id'],
@@ -484,16 +482,16 @@ def rerun_job(job_id):
                 frame_skip=original_job['frame_skip'],
                 job_date=original_job['job_date'],
                 start_time=original_job['start_time'],
-                end_time=original_job['end_time']
+                end_time=original_job['end_time'],
             )
-
+ 
         current_app.logger.info(f"Job {job_id} rerun as new job {new_job_id}")
         return jsonify({
             'new_job_id': new_job_id,
             'status': 'pending',
             'message': f'Job rerun successfully. New job ID: {new_job_id}'
         }), 202
-
+ 
     except Exception as e:
         current_app.logger.error(f"Error rerunning job: {str(e)}")
         import traceback
@@ -540,31 +538,37 @@ def list_jobs():
         job_list = []
         for job in jobs:
             job_dict = dict(job)
-            # Provide a human-readable file_name for the frontend.
-            # Batch jobs have their filenames in job_query_images; expose a
-            # placeholder here so the frontend always gets a non-null value.
+    
+            # ── file_name label ──────────────────────────────────────────────
             if job_dict.get('query_image_filename'):
                 job_dict['file_name'] = job_dict['query_image_filename']
             else:
-                # Batch job – fetch first query image filename as label
                 first = db.execute(
                     'SELECT query_image_filename FROM job_query_images '
                     'WHERE job_id = ? ORDER BY created_at LIMIT 1',
                     (job_dict['id'],)
                 ).fetchone()
                 job_dict['file_name'] = first['query_image_filename'] if first else 'Batch Job'
-            # Expose lightweight in-progress fields; strip heavy result_data (e.g. completed matches).
+    
+            # ── camera label for multi-camera jobs ──────────────────────────
+            raw_cam_ids = job_dict.get('camera_ids')
+            if raw_cam_ids:
+                try:
+                    cam_list = json.loads(raw_cam_ids)
+                    if isinstance(cam_list, list) and len(cam_list) > 1:
+                        job_dict['camera_count'] = len(cam_list)
+                        job_dict['camera_names'] = [e.get('camera_name', '') for e in cam_list]
+                except Exception:
+                    pass
+            job_dict.pop('camera_ids', None)   # strip raw JSON from response
+    
+            # ── lightweight progress fields ──────────────────────────────────
             raw_result = job_dict.get('result_data')
             if raw_result and job_dict.get('status') == 'processing':
                 try:
                     pdata = json.loads(raw_result)
                     if isinstance(pdata, dict):
-                        for key in (
-                            'progress_percent',
-                            'frames_total',
-                            'frames_read',
-                            'frames_processed',
-                        ):
+                        for key in ('progress_percent', 'frames_total', 'frames_read', 'frames_processed'):
                             if key in pdata and pdata[key] is not None:
                                 job_dict[key] = pdata[key]
                 except (json.JSONDecodeError, TypeError):
