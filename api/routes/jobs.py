@@ -517,7 +517,7 @@ def list_jobs():
         db = get_db()
         
         query = (
-            'SELECT id, status, camera_id, detection_id, '
+            'SELECT id, status, camera_id, camera_ids, detection_id, '
             'query_image_filename, threshold, frame_skip, '
             'job_date, start_time, end_time, '
             'result_data, error_message, '
