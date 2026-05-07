@@ -58,7 +58,8 @@ def get_vehicle_track(track_id):
                     'camera_name': d['camera_name'],
                     'latitude': d['latitude'],
                     'longitude': d['longitude'],
-                    'timestamp': d['timestamp'],
+                    'timestamp': d['captured_at'],
+                    'video_offset_seconds': d['timestamp'],
                     'confidence': d['match_score'],
                 }
                 for d in detections
