@@ -2,10 +2,29 @@
 Vehicle tracking endpoints.
 Provides endpoints for querying vehicle tracks and cross-camera correlations.
 """
+from datetime import datetime as _dt, timezone as _tz
 from flask import Blueprint, jsonify, request
 from ..db import get_db
 from .store import store_vehicle_detection
 from .correlate import TRACKING_CONFIG
+
+
+def _fmt_detection_ts(ts, fallback):
+    """
+    Return a display timestamp for a vehicle_detection row.
+
+    Batch jobs store absolute UTC epoch seconds (> 1e9).
+    Single-video jobs store a video offset in seconds (small float).
+    Returns an ISO-format string for epoch values, or falls back to the
+    detection-session captured_at for legacy video-offset values.
+    """
+    try:
+        t = float(ts)
+        if t > 1_000_000_000:
+            return _dt.fromtimestamp(t, tz=_tz.utc).strftime('%Y-%m-%d %H:%M:%S')
+    except (TypeError, ValueError):
+        pass
+    return fallback
 
 bp = Blueprint('tracking_api', __name__, url_prefix='/tracking')
 
@@ -59,8 +78,10 @@ def get_vehicle_track(track_id):
                     'camera_name': d['camera_name'],
                     'latitude': d['latitude'],
                     'longitude': d['longitude'],
-                    'timestamp': d['captured_at'],
-                    'video_offset_seconds': d['timestamp'],
+                    # Use the stored absolute UTC timestamp when available
+                    # (batch jobs); fall back to the session captured_at for
+                    # legacy single-video jobs that store video offsets.
+                    'timestamp': _fmt_detection_ts(d['timestamp'], d['captured_at']),
                     'confidence': d['match_score'],
                 }
                 for d in detections

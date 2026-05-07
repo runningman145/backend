@@ -57,7 +57,8 @@ def extract_embedding(image, model, transform_func, device):
 def process_video_data(video_data, yolo_model, reid_model, transform_func, device,
                        query_embedding, threshold, frame_skip, detection_id=None, camera_id=None,
                        video_path=None, video_progress_callback=None,
-                       start_seconds=None, end_seconds=None, job_id=None):
+                       start_seconds=None, end_seconds=None, job_id=None,
+                       video_start_utc: float = None, skip_correlation: bool = False):
     """
     Process a video and return matches against the query embedding.
 
@@ -342,24 +343,37 @@ def process_video_data(video_data, yolo_model, reid_model, transform_func, devic
         if detection_id and camera_id and pending_correlations:
             try:
                 for item in pending_correlations:
+                    # For batch jobs, store absolute UTC epoch seconds so that
+                    # detections across different cameras share a common time axis.
+                    # For single-video jobs (video_start_utc=None) keep the video
+                    # offset so existing behaviour is unchanged.
+                    stored_ts = (
+                        video_start_utc + item['timestamp']
+                        if video_start_utc is not None
+                        else item['timestamp']
+                    )
                     vehicle_det_id = store_vehicle_detection(
                         detection_id=detection_id,
                         camera_id=camera_id,
-                        timestamp=item['timestamp'],
+                        timestamp=stored_ts,
                         box=item['box'],
                         embedding=item['vehicle_embedding'].tolist(),
                         match_score=item['match_score'],
                         query_embedding=query_embedding,
                         job_id=job_id,
                     )
-                    track_id = correlate_vehicle_detections(
-                        vehicle_det_id, camera_id,
-                        item['timestamp'], item['vehicle_embedding'],
-                        job_id=job_id,
-                        query_embedding=query_embedding
-                    )
-                    if track_id:
-                        results[item['result_index']]['track_id'] = track_id
+                    # Batch jobs skip inline correlation; a single post-processing
+                    # pass in worker.py handles cross-camera track building after
+                    # all cameras have been stored (fixes the sequence problem).
+                    if not skip_correlation:
+                        track_id = correlate_vehicle_detections(
+                            vehicle_det_id, camera_id,
+                            item['timestamp'], item['vehicle_embedding'],
+                            job_id=job_id,
+                            query_embedding=query_embedding
+                        )
+                        if track_id:
+                            results[item['result_index']]['track_id'] = track_id
             except Exception as e:
                 current_app.logger.warning(f"Error in batch correlation: {str(e)}")
 

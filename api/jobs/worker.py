@@ -308,6 +308,7 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
                 # Compute within-video start/end offsets
                 start_seconds = None
                 end_seconds   = None
+                video_start_utc_seconds = None   # absolute UTC epoch for timestamp storage
                 try:
                     video_start_utc = datetime.strptime(video['captured_at_utc'], '%Y-%m-%d %H:%M:%S')
                     job_start_utc   = datetime.strptime(start_datetime_utc, '%Y-%m-%d %H:%M:%S')
@@ -317,6 +318,8 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
                     if end_seconds <= 0 or end_seconds <= start_seconds:
                         pairs_done += 1
                         continue
+                    # Epoch seconds — comparable across cameras for post-correlation.
+                    video_start_utc_seconds = (video_start_utc - datetime(1970, 1, 1)).total_seconds()
                 except Exception:
                     start_seconds = None
                     end_seconds   = None
@@ -354,6 +357,8 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
                         start_seconds=start_seconds,
                         end_seconds=end_seconds,
                         job_id=job_id,
+                        video_start_utc=video_start_utc_seconds,
+                        skip_correlation=True,
                     )
 
                     for result in results:
@@ -373,7 +378,23 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
                 pairs_done += 1
 
     # ------------------------------------------------------------------ #
-    # 7. Save final results                                                #
+    # 7. Cross-camera track correlation (post-processing)                 #
+    # Run after ALL cameras are stored so every detection is available    #
+    # for symmetric time-window comparison using absolute UTC timestamps. #
+    # Only needed for multi-camera jobs; single-camera jobs use inline    #
+    # correlation which is still correct for that case.                   #
+    # ------------------------------------------------------------------ #
+    if len(camera_entries) > 1 and not _is_cancelled(job_id):
+        try:
+            from ..tracking.correlate import post_correlate_batch_detections
+            post_correlate_batch_detections(job_id, db)
+        except Exception as e:
+            current_app.logger.error(
+                f"Job {job_id}: post-correlation failed: {e}"
+            )
+
+    # ------------------------------------------------------------------ #
+    # 8. Save final results                                                #
     # ------------------------------------------------------------------ #
     result_data = json.dumps({
         'matches':             all_results,

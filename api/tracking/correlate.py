@@ -200,6 +200,123 @@ def _create_single_vehicle_track(track_id, vehicle_detection_id, camera_id, time
         current_app.logger.error(f"Error creating single vehicle track: {str(e)}")
 
 
+def post_correlate_batch_detections(job_id, db):
+    """
+    Build cross-camera tracks after all cameras in a batch job are processed.
+
+    Inline correlation (called per-video during processing) cannot link Camera A
+    detections to Camera B because Camera B hasn't been stored yet when Camera A
+    runs.  This function runs once after the entire job loop finishes:
+
+    1. Clears any single-camera tracks created inline (they're incomplete).
+    2. Fetches all vehicle_detections for the job.
+    3. Uses union-find with a symmetric |t_a - t_b| <= TIME_WINDOW check on the
+       absolute UTC epoch timestamps now stored in vehicle_detections.timestamp.
+    4. Creates new tracks — multi-camera tracks where detections match, single-
+       camera tracks otherwise.
+    """
+    from flask import current_app
+
+    rows = db.execute(
+        '''SELECT vd.id, vd.camera_id, vd.timestamp, vd.embedding
+           FROM vehicle_detections vd
+           WHERE vd.job_id = ?
+           ORDER BY vd.timestamp ASC''',
+        (job_id,)
+    ).fetchall()
+
+    if not rows:
+        return
+
+    # Remove inline-created tracks so we start fresh.
+    old_track_ids = [
+        r['id'] for r in db.execute(
+            'SELECT id FROM vehicle_tracks WHERE job_id = ?', (job_id,)
+        ).fetchall()
+    ]
+    for tid in old_track_ids:
+        db.execute('DELETE FROM track_detections WHERE track_id = ?', (tid,))
+    db.execute('DELETE FROM vehicle_tracks WHERE job_id = ?', (job_id,))
+    db.commit()
+
+    # Pre-parse everything once.
+    ids = [r['id'] for r in rows]
+    cameras = [r['camera_id'] for r in rows]
+    timestamps = [float(r['timestamp']) for r in rows]
+    embeddings: list = []
+    for r in rows:
+        try:
+            embeddings.append(np.array(json.loads(r['embedding'])))
+        except Exception:
+            embeddings.append(None)
+
+    # --- Union-Find ---
+    parent = list(range(len(ids)))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]   # path compression
+            x = parent[x]
+        return x
+
+    def union(x: int, y: int) -> None:
+        parent[find(x)] = find(y)
+
+    threshold = TRACKING_CONFIG['EMBEDDING_SIMILARITY_THRESHOLD']
+    time_window = TRACKING_CONFIG['TIME_WINDOW_SECONDS']
+    n = len(rows)
+
+    # Rows are sorted by timestamp, so break the inner loop once the time gap
+    # exceeds the window — no further j can satisfy the condition.
+    for i in range(n):
+        emb_i = embeddings[i]
+        if emb_i is None:
+            continue
+        for j in range(i + 1, n):
+            if timestamps[j] - timestamps[i] > time_window:
+                break
+            if cameras[j] == cameras[i]:        # same camera — skip
+                continue
+            emb_j = embeddings[j]
+            if emb_j is None:
+                continue
+            if cosine_similarity(emb_i, emb_j) >= threshold:
+                union(i, j)
+
+    # Group indices by their union-find root.
+    groups: dict[int, list[int]] = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+
+    # Write tracks to DB.
+    n_multi = 0
+    for indices in groups.values():
+        track_id = str(uuid.uuid4())
+        cam_set = {cameras[i] for i in indices}
+        first_cam = cameras[indices[0]]
+        last_cam = cameras[indices[-1]]
+
+        db.execute(
+            'INSERT INTO vehicle_tracks (id, job_id, first_camera_id, last_camera_id) '
+            'VALUES (?, ?, ?, ?)',
+            (track_id, job_id, first_cam, last_cam)
+        )
+        for i in indices:
+            db.execute(
+                'INSERT OR IGNORE INTO track_detections (track_id, vehicle_detection_id) '
+                'VALUES (?, ?)',
+                (track_id, ids[i])
+            )
+        if len(cam_set) > 1:
+            n_multi += 1
+
+    db.commit()
+    current_app.logger.info(
+        f"Job {job_id}: post-correlation → {len(groups)} tracks "
+        f"({n_multi} spanning multiple cameras)"
+    )
+
+
 def _calculate_distance(lat1, lon1, lat2, lon2):
     """Calculate approximate distance between two GPS coordinates in km."""
     try:
