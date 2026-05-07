@@ -49,22 +49,27 @@ CREATE TABLE vehicle_detections (
     box_y2 INTEGER NOT NULL,
     box_area INTEGER NOT NULL,
     embedding BLOB NOT NULL,
+    query_embedding BLOB,
     match_score REAL,
+    job_id TEXT,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (detection_id) REFERENCES detections(id),
-    FOREIGN KEY (camera_id) REFERENCES cameras(id)
+    FOREIGN KEY (camera_id) REFERENCES cameras(id),
+    FOREIGN KEY (job_id) REFERENCES jobs(id)
 );
 
 -- a table for vehicle tracks (grouped detections across cameras)
 CREATE TABLE vehicle_tracks (
     id TEXT PRIMARY KEY,
+    job_id TEXT,
     first_seen TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_seen TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     first_camera_id TEXT NOT NULL,
     last_camera_id TEXT NOT NULL,
     vehicle_count INTEGER DEFAULT 1,
     FOREIGN KEY (first_camera_id) REFERENCES cameras(id),
-    FOREIGN KEY (last_camera_id) REFERENCES cameras(id)
+    FOREIGN KEY (last_camera_id) REFERENCES cameras(id),
+    FOREIGN KEY (job_id) REFERENCES jobs(id)
 );
 
 -- junction table: vehicle_detections <-> vehicle_tracks

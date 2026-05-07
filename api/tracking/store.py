@@ -7,7 +7,8 @@ from flask import current_app
 from ..db import get_db
 
 
-def store_vehicle_detection(detection_id, camera_id, timestamp, box, embedding, match_score=None):
+def store_vehicle_detection(detection_id, camera_id, timestamp, box, embedding, match_score=None, 
+                            query_embedding=None, job_id=None):
     """
     Store a detected vehicle with its embedding for tracking.
     
@@ -18,6 +19,8 @@ def store_vehicle_detection(detection_id, camera_id, timestamp, box, embedding, 
         box: Dict with keys x1, y1, x2, y2 (bbox coordinates)
         embedding: numpy array of ReID embedding
         match_score: Optional similarity score to query image
+        query_embedding: Optional numpy array of the original query image embedding
+        job_id: Optional ID of the job that triggered this detection
     
     Returns:
         vehicle_detection_id (integer)
@@ -28,16 +31,22 @@ def store_vehicle_detection(detection_id, camera_id, timestamp, box, embedding, 
         embedding_list = embedding.tolist() if hasattr(embedding, 'tolist') else embedding
         embedding_bytes = json.dumps(embedding_list).encode('utf-8')
         
+        # Serialize query_embedding if provided
+        query_embedding_bytes = None
+        if query_embedding is not None:
+            query_embedding_list = query_embedding.tolist() if hasattr(query_embedding, 'tolist') else query_embedding
+            query_embedding_bytes = json.dumps(query_embedding_list).encode('utf-8')
+        
         box_area = (box['x2'] - box['x1']) * (box['y2'] - box['y1'])
         
         db = get_db()
         cursor = db.execute(
             '''INSERT INTO vehicle_detections 
-               (detection_id, camera_id, timestamp, box_x1, box_y1, box_x2, box_y2, box_area, embedding, match_score)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+               (detection_id, camera_id, timestamp, box_x1, box_y1, box_x2, box_y2, box_area, embedding, query_embedding, match_score, job_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (detection_id, camera_id, timestamp,
              box['x1'], box['y1'], box['x2'], box['y2'],
-             box_area, embedding_bytes, match_score)
+             box_area, embedding_bytes, query_embedding_bytes, match_score, job_id)
         )
         db.commit()
         

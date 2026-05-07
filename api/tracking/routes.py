@@ -20,7 +20,7 @@ def get_vehicle_track(track_id):
     try:
         db = get_db()
         track = db.execute(
-            '''SELECT vt.id, vt.first_seen, vt.last_seen, 
+            '''SELECT vt.id, vt.job_id, vt.first_seen, vt.last_seen, 
                       COUNT(DISTINCT td.vehicle_detection_id) as detection_count,
                       COUNT(DISTINCT vd.camera_id) as camera_count
                FROM vehicle_tracks vt
@@ -48,6 +48,7 @@ def get_vehicle_track(track_id):
         
         return {
             'track_id': track['id'],
+            'job_id': track['job_id'],
             'first_seen': track['first_seen'],
             'last_seen': track['last_seen'],
             'detection_count': track['detection_count'],
@@ -88,26 +89,46 @@ def get_vehicle_track(track_id):
         return None
 
 
-def get_all_tracks(limit=100, offset=0):
-    """Get all vehicle tracks with summary info."""
+def get_all_tracks(limit=100, offset=0, job_id=None):
+    """Get all vehicle tracks with summary info, optionally filtered by job_id."""
     try:
         db = get_db()
-        tracks = db.execute(
-            '''SELECT vt.id, vt.first_seen, vt.last_seen, 
-                      COUNT(DISTINCT td.vehicle_detection_id) as detection_count,
-                      COUNT(DISTINCT vd.camera_id) as camera_count
-               FROM vehicle_tracks vt
-               LEFT JOIN track_detections td ON vt.id = td.track_id
-               LEFT JOIN vehicle_detections vd ON td.vehicle_detection_id = vd.id
-               GROUP BY vt.id
-               ORDER BY vt.last_seen DESC
-               LIMIT ? OFFSET ?''',
-            (limit, offset)
-        ).fetchall()
+        
+        if job_id:
+            # Filter by specific job
+            tracks = db.execute(
+                '''SELECT vt.id, vt.job_id, vt.first_seen, vt.last_seen, 
+                          COUNT(DISTINCT td.vehicle_detection_id) as detection_count,
+                          COUNT(DISTINCT vd.camera_id) as camera_count
+                   FROM vehicle_tracks vt
+                   LEFT JOIN track_detections td ON vt.id = td.track_id
+                   LEFT JOIN vehicle_detections vd ON td.vehicle_detection_id = vd.id
+                   WHERE vt.job_id = ?
+                   GROUP BY vt.id
+                   ORDER BY vt.last_seen DESC
+                   LIMIT ? OFFSET ?''',
+                (job_id, limit, offset)
+            ).fetchall()
+        else:
+            # Get all tracks (only those with job_id set - filtered tracks)
+            tracks = db.execute(
+                '''SELECT vt.id, vt.job_id, vt.first_seen, vt.last_seen, 
+                          COUNT(DISTINCT td.vehicle_detection_id) as detection_count,
+                          COUNT(DISTINCT vd.camera_id) as camera_count
+                   FROM vehicle_tracks vt
+                   LEFT JOIN track_detections td ON vt.id = td.track_id
+                   LEFT JOIN vehicle_detections vd ON td.vehicle_detection_id = vd.id
+                   WHERE vt.job_id IS NOT NULL
+                   GROUP BY vt.id
+                   ORDER BY vt.last_seen DESC
+                   LIMIT ? OFFSET ?''',
+                (limit, offset)
+            ).fetchall()
         
         return [
             {
                 'track_id': t['id'],
+                'job_id': t['job_id'],
                 'first_seen': t['first_seen'],
                 'last_seen': t['last_seen'],
                 'detection_count': t['detection_count'],
@@ -157,22 +178,24 @@ def get_tracks_for_camera(camera_id, limit=50):
 
 @bp.route('/tracks', methods=['GET'])
 def list_tracks():
-    """Get all vehicle tracks with pagination."""
+    """Get all vehicle tracks with pagination, optionally filtered by job_id."""
     try:
         limit = request.args.get('limit', 100, type=int)
         offset = request.args.get('offset', 0, type=int)
+        job_id = request.args.get('job_id', None, type=str)  # Optional job_id filter
         
         # Validate parameters
         limit = max(1, min(limit, 500))  # Cap at 500
         offset = max(0, offset)
         
-        tracks = get_all_tracks(limit=limit, offset=offset)
+        tracks = get_all_tracks(limit=limit, offset=offset, job_id=job_id)
         
         return jsonify({
             'tracks': tracks,
             'count': len(tracks),
             'limit': limit,
             'offset': offset,
+            'job_id_filter': job_id,
         }), 200
     
     except Exception as e:
@@ -192,6 +215,31 @@ def get_track(track_id):
     
     except Exception as e:
         return jsonify({'error': f'Failed to get track: {str(e)}'}), 500
+
+
+@bp.route('/jobs/<job_id>/tracks', methods=['GET'])
+def get_job_tracks(job_id):
+    """Get all vehicle tracks that originated from a specific search job."""
+    try:
+        limit = request.args.get('limit', 100, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        
+        # Validate parameters
+        limit = max(1, min(limit, 500))
+        offset = max(0, offset)
+        
+        tracks = get_all_tracks(limit=limit, offset=offset, job_id=job_id)
+        
+        return jsonify({
+            'job_id': job_id,
+            'tracks': tracks,
+            'count': len(tracks),
+            'limit': limit,
+            'offset': offset,
+        }), 200
+    
+    except Exception as e:
+        return jsonify({'error': f'Failed to get job tracks: {str(e)}'}), 500
 
 
 @bp.route('/cameras/<camera_id>/tracks', methods=['GET'])

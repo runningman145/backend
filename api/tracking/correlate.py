@@ -19,7 +19,7 @@ TRACKING_CONFIG = {
 }
 
 
-def correlate_vehicle_detections(new_vehicle_id, camera_id, timestamp, embedding):
+def correlate_vehicle_detections(new_vehicle_id, camera_id, timestamp, embedding, job_id=None, query_embedding=None):
     """
     Find similar vehicles across cameras and group them into tracks.
     
@@ -28,6 +28,8 @@ def correlate_vehicle_detections(new_vehicle_id, camera_id, timestamp, embedding
         camera_id: Camera where vehicle was detected
         timestamp: When vehicle was detected
         embedding: numpy array of ReID embedding
+        job_id: Optional ID of the job that triggered this detection (for filtering)
+        query_embedding: Optional numpy array of the original query image embedding
     
     Returns:
         track_id: ID of track (new or existing)
@@ -35,23 +37,44 @@ def correlate_vehicle_detections(new_vehicle_id, camera_id, timestamp, embedding
     try:
         db = get_db()
         
-        # Query recent vehicle detections from other cameras
+        # Query recent vehicle detections from OTHER cameras within the same job/search
         time_window_start = timestamp - TRACKING_CONFIG['TIME_WINDOW_SECONDS']
         
-        recent_detections = db.execute(
-            '''SELECT vd.id, vd.camera_id, vd.timestamp, vd.embedding, vt.id as track_id, c1.latitude, c1.longitude, c2.latitude as cam2_lat, c2.longitude as cam2_lon
-               FROM vehicle_detections vd
-               LEFT JOIN track_detections td ON vd.id = td.vehicle_detection_id
-               LEFT JOIN vehicle_tracks vt ON td.track_id = vt.id
-               JOIN cameras c1 ON vd.camera_id = c1.id
-               JOIN cameras c2 ON c2.id = ?
-               WHERE vd.camera_id != ? 
-               AND vd.timestamp > ?
-               AND vd.timestamp < ?
-               ORDER BY vd.timestamp DESC
-               LIMIT 100''',
-            (camera_id, camera_id, time_window_start, timestamp)
-        ).fetchall()
+        # Build the base query - filter by job_id if provided
+        if job_id:
+            recent_detections = db.execute(
+                '''SELECT vd.id, vd.camera_id, vd.timestamp, vd.embedding, vd.query_embedding, 
+                          vt.id as track_id, c1.latitude, c1.longitude, c2.latitude as cam2_lat, c2.longitude as cam2_lon
+                   FROM vehicle_detections vd
+                   LEFT JOIN track_detections td ON vd.id = td.vehicle_detection_id
+                   LEFT JOIN vehicle_tracks vt ON td.track_id = vt.id
+                   JOIN cameras c1 ON vd.camera_id = c1.id
+                   JOIN cameras c2 ON c2.id = ?
+                   WHERE vd.camera_id != ? 
+                   AND vd.job_id = ?
+                   AND vd.timestamp > ?
+                   AND vd.timestamp < ?
+                   ORDER BY vd.timestamp DESC
+                   LIMIT 100''',
+                (camera_id, camera_id, job_id, time_window_start, timestamp)
+            ).fetchall()
+        else:
+            # Fallback for legacy calls without job_id (shouldn't happen in normal operation)
+            recent_detections = db.execute(
+                '''SELECT vd.id, vd.camera_id, vd.timestamp, vd.embedding, vd.query_embedding, 
+                          vt.id as track_id, c1.latitude, c1.longitude, c2.latitude as cam2_lat, c2.longitude as cam2_lon
+                   FROM vehicle_detections vd
+                   LEFT JOIN track_detections td ON vd.id = td.vehicle_detection_id
+                   LEFT JOIN vehicle_tracks vt ON td.track_id = vt.id
+                   JOIN cameras c1 ON vd.camera_id = c1.id
+                   JOIN cameras c2 ON c2.id = ?
+                   WHERE vd.camera_id != ? 
+                   AND vd.timestamp > ?
+                   AND vd.timestamp < ?
+                   ORDER BY vd.timestamp DESC
+                   LIMIT 100''',
+                (camera_id, camera_id, time_window_start, timestamp)
+            ).fetchall()
         
         best_match = None
         best_similarity = TRACKING_CONFIG['EMBEDDING_SIMILARITY_THRESHOLD']
@@ -61,7 +84,13 @@ def correlate_vehicle_detections(new_vehicle_id, camera_id, timestamp, embedding
             other_embedding = np.array(json.loads(detection['embedding']))
             
             # Calculate cosine similarity
-            similarity = cosine_similarity(embedding, other_embedding)
+            # If query_embedding is available, compare against that; otherwise use vehicle-to-vehicle
+            if query_embedding is not None:
+                # Compare new detection against the original query image
+                similarity = cosine_similarity(query_embedding, other_embedding)
+            else:
+                # Compare against the detected vehicle's embedding
+                similarity = cosine_similarity(embedding, other_embedding)
             
             # Check spatial proximity if enabled
             if TRACKING_CONFIG['SPATIAL_FILTER_ENABLED']:
@@ -87,11 +116,11 @@ def correlate_vehicle_detections(new_vehicle_id, camera_id, timestamp, embedding
         elif best_match:
             # Create new track from matched pair
             track_id = str(uuid.uuid4())
-            _create_track(track_id, best_match, new_vehicle_id, camera_id, timestamp)
+            _create_track(track_id, best_match, new_vehicle_id, camera_id, timestamp, job_id)
         else:
             # No match - create new track with just this vehicle
             track_id = str(uuid.uuid4())
-            _create_single_vehicle_track(track_id, new_vehicle_id, camera_id, timestamp)
+            _create_single_vehicle_track(track_id, new_vehicle_id, camera_id, timestamp, job_id)
         
         return track_id
     
@@ -99,7 +128,7 @@ def correlate_vehicle_detections(new_vehicle_id, camera_id, timestamp, embedding
         current_app.logger.error(f"Error correlating vehicle detections: {str(e)}")
         # Return new track on error
         track_id = str(uuid.uuid4())
-        _create_single_vehicle_track(track_id, new_vehicle_id, camera_id, timestamp)
+        _create_single_vehicle_track(track_id, new_vehicle_id, camera_id, timestamp, job_id)
         return track_id
 
 
@@ -123,16 +152,16 @@ def _add_vehicle_to_track(vehicle_detection_id, track_id):
         current_app.logger.error(f"Error adding vehicle to track: {str(e)}")
 
 
-def _create_track(track_id, matched_detection, new_vehicle_id, camera_id, timestamp):
+def _create_track(track_id, matched_detection, new_vehicle_id, camera_id, timestamp, job_id=None):
     """Create a new track linking two detected vehicles."""
     try:
         db = get_db()
         
         # Create track
         db.execute(
-            '''INSERT INTO vehicle_tracks (id, first_camera_id, last_camera_id)
-               VALUES (?, ?, ?)''',
-            (track_id, matched_detection['camera_id'], camera_id)
+            '''INSERT INTO vehicle_tracks (id, job_id, first_camera_id, last_camera_id)
+               VALUES (?, ?, ?, ?)''',
+            (track_id, job_id, matched_detection['camera_id'], camera_id)
         )
         
         # Add both vehicles to track
@@ -150,15 +179,15 @@ def _create_track(track_id, matched_detection, new_vehicle_id, camera_id, timest
         current_app.logger.error(f"Error creating track: {str(e)}")
 
 
-def _create_single_vehicle_track(track_id, vehicle_detection_id, camera_id, timestamp):
+def _create_single_vehicle_track(track_id, vehicle_detection_id, camera_id, timestamp, job_id=None):
     """Create a track with just one vehicle detection."""
     try:
         db = get_db()
         
         db.execute(
-            '''INSERT INTO vehicle_tracks (id, first_camera_id, last_camera_id)
-               VALUES (?, ?, ?)''',
-            (track_id, camera_id, camera_id)
+            '''INSERT INTO vehicle_tracks (id, job_id, first_camera_id, last_camera_id)
+               VALUES (?, ?, ?, ?)''',
+            (track_id, job_id, camera_id, camera_id)
         )
         
         db.execute(

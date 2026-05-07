@@ -57,7 +57,7 @@ def extract_embedding(image, model, transform_func, device):
 def process_video_data(video_data, yolo_model, reid_model, transform_func, device,
                        query_embedding, threshold, frame_skip, detection_id=None, camera_id=None,
                        video_path=None, video_progress_callback=None,
-                       start_seconds=None, end_seconds=None):
+                       start_seconds=None, end_seconds=None, job_id=None):
     """
     Process a video and return matches against the query embedding.
 
@@ -84,6 +84,7 @@ def process_video_data(video_data, yolo_model, reid_model, transform_func, devic
                        beginning of the video before processing.
         end_seconds:   Optional float. If provided, stop processing when the decode timestamp
                        reaches this offset (in seconds) from the beginning of the video.
+        job_id:        Optional job ID for linking detections and tracks to their originating search.
 
     Returns:
         List of match dicts {time, match_percent, box, frame_id, frame_image, ...}.
@@ -348,10 +349,14 @@ def process_video_data(video_data, yolo_model, reid_model, transform_func, devic
                         box=item['box'],
                         embedding=item['vehicle_embedding'].tolist(),
                         match_score=item['match_score'],
+                        query_embedding=query_embedding,
+                        job_id=job_id,
                     )
                     track_id = correlate_vehicle_detections(
                         vehicle_det_id, camera_id,
-                        item['timestamp'], item['vehicle_embedding']
+                        item['timestamp'], item['vehicle_embedding'],
+                        job_id=job_id,
+                        query_embedding=query_embedding
                     )
                     if track_id:
                         results[item['result_index']]['track_id'] = track_id

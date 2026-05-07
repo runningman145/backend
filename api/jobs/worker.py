@@ -116,6 +116,7 @@ def process_single_job(job, db, upload_folder, yolo_model, reid_model, transform
         camera_id=job['camera_id'],
         video_path=video_path,
         video_progress_callback=_on_video_progress,
+        job_id=job_id,
     )
 
     # Store detection matches in database (frame_image is not a DB column – strip it)
@@ -314,6 +315,7 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
                     video_progress_callback=_on_batch_video_progress,
                     start_seconds=start_seconds,
                     end_seconds=end_seconds,
+                    job_id=job_id,
                 )
 
                 # Add video and query image info to results
