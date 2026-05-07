@@ -79,7 +79,7 @@ class JobQueue:
             # Use a write-level transaction so only one worker claims this row.
             db.execute('BEGIN IMMEDIATE')
             job = db.execute(
-                'SELECT id, camera_id, detection_id, video_filename, query_image_filename, '
+                'SELECT id, camera_id, camera_ids, detection_id, video_filename, query_image_filename, '
                 'threshold, frame_skip, job_date, start_time, end_time, status '
                 'FROM jobs WHERE status = ? ORDER BY created_at ASC LIMIT 1',
                 ('pending',)

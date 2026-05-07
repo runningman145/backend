@@ -209,9 +209,30 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
     # 5. Count total work for overall progress                             #
     # ------------------------------------------------------------------ #
     # We'll count videos per camera below; initialise to 1 so we never /0
-    total_pairs    = 1
-    pairs_done     = 0
-    all_results    = []
+    total_pairs = 0
+    for cam_entry in camera_entries:
+        cam_id_pre = cam_entry['camera_id']
+        st_pre = cam_entry.get('start_time') or job['start_time']
+        et_pre = cam_entry.get('end_time') or job['end_time']
+        if len(st_pre.split(':')) == 2: st_pre = f"{st_pre}:00"
+        if len(et_pre.split(':')) == 2: et_pre = f"{et_pre}:00"
+        try:
+            s_utc = (datetime.strptime(f"{job_date} {st_pre}", '%Y-%m-%d %H:%M:%S') - TIMEZONE_OFFSET).strftime('%Y-%m-%d %H:%M:%S')
+            e_utc = (datetime.strptime(f"{job_date} {et_pre}", '%Y-%m-%d %H:%M:%S') - TIMEZONE_OFFSET).strftime('%Y-%m-%d %H:%M:%S')
+            pre_videos = db.execute(
+                "SELECT COUNT(*) as cnt FROM videos "
+                "WHERE camera_id = ? "
+                "AND SUBSTR(REPLACE(captured_at,'T',' '),1,19) >= ? "
+                "AND SUBSTR(REPLACE(captured_at,'T',' '),1,19) <= ?",
+                (cam_id_pre, s_utc, e_utc)
+            ).fetchone()['cnt']
+            total_pairs += len(query_embeddings) * pre_videos
+        except Exception:
+            pass
+
+    total_pairs = max(1, total_pairs)  # guard against zero
+    pairs_done = 0
+    all_results = []
 
     # ------------------------------------------------------------------ #
     # 6. Main loop: cameras → videos → query images                        #
@@ -268,9 +289,6 @@ def process_batch_job(job, db, upload_folder, yolo_model, reid_model, transform_
                 f"between {start_datetime_utc} and {end_datetime_utc} UTC"
             )
             continue
-
-        # Accumulate total pairs for progress tracking
-        total_pairs += len(query_embeddings) * len(videos)
 
         for qi, (query_image_filename, query_embedding) in enumerate(query_embeddings):
             if _is_cancelled(job_id):
