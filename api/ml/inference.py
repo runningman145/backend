@@ -46,7 +46,7 @@ def extract_embedding(image, model, transform_func, device):
         Normalized embedding vector (numpy array)
     """
     image_tensor = transform_func(image).unsqueeze(0).to(device)
-    with torch.no_grad():
+    with torch.inference_mode():
         embedding = model(image_tensor)
     
     embedding = embedding.squeeze().cpu().numpy()
@@ -235,11 +235,14 @@ def process_video_data(video_data, yolo_model, reid_model, transform_func, devic
             try:
                 h, w = frame.shape[:2]
 
-                # Resize frame for YOLO processing
-                small_frame = cv2.resize(frame, (MODEL_CONFIG['YOLO_IMGSZ'], MODEL_CONFIG['YOLO_IMGSZ']))
+                # Downscale once for YOLO only — keeps memory and resize cost low
+                working_frame = cv2.resize(frame, (1280, 720)) if w > 1280 else frame
+
+                # Resize working frame for YOLO input
+                small_frame = cv2.resize(working_frame, (MODEL_CONFIG['YOLO_IMGSZ'], MODEL_CONFIG['YOLO_IMGSZ']))
 
                 # Run YOLO detection
-                detections = yolo_model(small_frame, imgsz=MODEL_CONFIG['YOLO_IMGSZ'], verbose=False)[0]
+                detections = yolo_model(small_frame, imgsz=MODEL_CONFIG['YOLO_IMGSZ'], conf=MODEL_CONFIG['YOLO_CONF'], verbose=False)[0]
 
                 # -------------------------------------------------------- #
                 # Collect all valid vehicle crops for this frame            #
@@ -254,7 +257,7 @@ def process_video_data(video_data, yolo_model, reid_model, transform_func, devic
                     coords = box.xyxy[0].cpu().numpy()
                     x1, y1, x2, y2 = coords
 
-                    # Scale coordinates back to original frame size
+                    # Scale coordinates back to original full-res frame dimensions
                     x1 = int(x1 * w / MODEL_CONFIG['YOLO_IMGSZ'])
                     x2 = int(x2 * w / MODEL_CONFIG['YOLO_IMGSZ'])
                     y1 = int(y1 * h / MODEL_CONFIG['YOLO_IMGSZ'])
@@ -269,10 +272,20 @@ def process_video_data(video_data, yolo_model, reid_model, transform_func, devic
                     if x2 <= x1 or y2 <= y1:
                         continue
 
-                    box_area = (x2 - x1) * (y2 - y1)
+                    # Box shape filters — reject shadows, lane lines, reflections
+                    box_w = x2 - x1
+                    box_h = y2 - y1
+                    if (box_w * box_h) < 4000:  continue   # minimum area
+                    if box_w < 40:              continue   # minimum width
+                    if box_h < 25:              continue   # minimum height
+                    aspect = box_w / box_h
+                    if aspect > 6.0 or aspect < 0.15: continue  # reject impossible shapes only
+
+                    box_area = box_w * box_h
                     if box_area < MODEL_CONFIG.get('MIN_BOX_AREA', 1000):
                         continue
 
+                    # Crop from original full-resolution frame
                     vehicle_crop = frame[y1:y2, x1:x2]
                     if vehicle_crop is None or vehicle_crop.size == 0:
                         continue
@@ -419,7 +432,7 @@ def process_image_for_matching(image_bytes, yolo_model, reid_model, transform_fu
     small_img = cv2.resize(img, (MODEL_CONFIG['YOLO_IMGSZ'], MODEL_CONFIG['YOLO_IMGSZ']))
     
     # Run detection
-    detections = yolo_model(small_img, imgsz=MODEL_CONFIG['YOLO_IMGSZ'], verbose=False)[0]
+    detections = yolo_model(small_img, imgsz=MODEL_CONFIG['YOLO_IMGSZ'], conf=MODEL_CONFIG['YOLO_CONF'], verbose=False)[0]
     
     vehicles = []
     
@@ -494,7 +507,7 @@ def batch_extract_embeddings(images, reid_model, transform_func, device):
     # Batch them together
     batch_tensor = torch.cat(image_tensors, dim=0).to(device)
     
-    with torch.no_grad():
+    with torch.inference_mode():
         embeddings = reid_model(batch_tensor)
     
     # Normalize and convert to numpy
