@@ -227,23 +227,34 @@ def _generate_mapbox_map(sightings, camera_coords, mapbox_token=None):
         current_app.logger.warning("MAPBOX_ACCESS_TOKEN not configured – skipping map")
         return None
 
-    coordinates = []
-    pins = []
-
-    for idx, sighting in enumerate(sightings):
+    # Collapse consecutive detections at the same camera into a single stop.
+    # The CSV has one row per matched frame, so a vehicle seen 10 times at
+    # Camera A then 5 times at Camera B would otherwise produce 15 identical
+    # waypoints and make the Directions API loop back on itself.
+    unique_stops = []  # list of (camera_id, lon, lat)
+    for sighting in sightings:
         camera_id = sighting.get('camera_id')
         if camera_id not in camera_coords:
             continue
-        coords = camera_coords[camera_id]
-        lat = coords['latitude']
-        lon = coords['longitude']
-        coordinates.append([lon, lat])
-        color = 'FF0000' if idx == 0 else ('00FF00' if idx == len(sightings) - 1 else '0000FF')
-        pins.append(f"pin-s+{color}({lon},{lat})")
+        c = camera_coords[camera_id]
+        lat, lon = c.get('latitude'), c.get('longitude')
+        if lat is None or lon is None:
+            continue
+        if unique_stops and unique_stops[-1][0] == camera_id:
+            continue  # same camera as previous stop — skip duplicate
+        unique_stops.append((camera_id, lon, lat))
 
-    if len(coordinates) < 2:
+    if len(unique_stops) < 2:
         current_app.logger.warning("Not enough valid sighting coordinates for map – skipping")
         return None
+
+    n = len(unique_stops)
+    coordinates = []
+    pins = []
+    for i, (_, lon, lat) in enumerate(unique_stops):
+        coordinates.append([lon, lat])
+        color = 'FF0000' if i == 0 else ('00FF00' if i == n - 1 else '0000FF')
+        pins.append(f"pin-s+{color}({lon},{lat})")
 
     # Get road-following route geometry from Mapbox Directions API.
     # Falls back to straight-line coordinates if the API call fails.
