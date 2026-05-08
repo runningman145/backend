@@ -2,10 +2,12 @@
 Reports endpoints.
 Generates court-ready PDF reports from officer-edited CSV data with optional Mapbox mapping.
 """
+import base64
 import json
 import csv
 import hashlib
 import hmac
+import os
 import requests
 from datetime import datetime
 from io import BytesIO, StringIO
@@ -15,7 +17,7 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
 from reportlab.platypus import (
     SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer,
-    PageBreak, Image
+    PageBreak, Image, KeepTogether
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
@@ -187,6 +189,133 @@ def _fetch_track_sightings(track_id):
         return []
 
 
+def _fetch_frame_images(job_id):
+    """
+    Return a dict mapping (timestamp_float, camera_id_str) -> base64 data URI
+    for every match stored in the job's result_data JSON.
+    Returns {} on any failure.
+    """
+    if not job_id:
+        return {}
+    try:
+        db = get_db()
+        row = db.execute(
+            'SELECT result_data FROM jobs WHERE id = ?',
+            (job_id,)
+        ).fetchone()
+        if not row or not row['result_data']:
+            return {}
+        result_data = json.loads(row['result_data'])
+        frame_map = {}
+        for match in result_data.get('matches', []):
+            ts = match.get('time')
+            cam_id = str(match.get('camera_id', ''))
+            img = match.get('frame_image')
+            if ts is not None and img:
+                frame_map[(float(ts), cam_id)] = img
+        return frame_map
+    except Exception as exc:
+        current_app.logger.warning(f"Could not fetch frame images for job {job_id}: {exc}")
+        return {}
+
+
+def _decode_frame_image(data_uri, width_in, height_in):
+    """
+    Decode a base64 JPEG data URI and return a ReportLab Image flowable,
+    or None on any failure.
+    """
+    if not data_uri:
+        return None
+    try:
+        b64_part = data_uri.split(',', 1)[1] if ',' in data_uri else data_uri
+        decoded = base64.b64decode(b64_part)
+        return Image(BytesIO(decoded), width=width_in * inch, height=height_in * inch)
+    except Exception as exc:
+        current_app.logger.warning(f"Could not decode frame image: {exc}")
+        return None
+
+
+def _lookup_frame_image(sighting, frame_map):
+    """
+    Find the frame image data URI for a sighting.
+
+    Tries (timestamp, camera_id) exact match, then approximate (±0.01 s) for same
+    camera, then approximate for any camera (single-camera job fallback).
+    """
+    if not frame_map:
+        return None
+    try:
+        ts = float(sighting.get('timestamp', ''))
+    except (ValueError, TypeError):
+        return None
+    cam_id = str(sighting.get('camera_id', ''))
+
+    if (ts, cam_id) in frame_map:
+        return frame_map[(ts, cam_id)]
+    for (fts, fcam), img in frame_map.items():
+        if fcam == cam_id and abs(fts - ts) <= 0.01:
+            return img
+    for (fts, _fcam), img in frame_map.items():
+        if abs(fts - ts) <= 0.01:
+            return img
+    return None
+
+
+def _ts_sort_key(sighting):
+    """
+    Sort key for sightings by timestamp.
+
+    Format B CSVs carry float seconds (e.g. "9.0", "12.0") that must be sorted
+    numerically — string sort would place "12.0" before "9.0" because '1' < '9'.
+    Format A CSVs carry ISO strings ("2024-04-28T09:15:22Z") which sort correctly
+    as strings; float() raises ValueError for them so we fall back to string order.
+    """
+    ts = sighting.get('timestamp', '')
+    try:
+        return (0, float(ts), '')
+    except (ValueError, TypeError):
+        return (1, 0.0, str(ts))
+
+
+def _fetch_query_image_data(job_id):
+    """
+    Return a BytesIO of the job's query image file, or None if unavailable.
+    Falls back to the first entry in job_query_images for batch jobs.
+    """
+    if not job_id:
+        return None
+    try:
+        db = get_db()
+        row = db.execute(
+            'SELECT query_image_filename FROM jobs WHERE id = ?',
+            (job_id,)
+        ).fetchone()
+        filename = row['query_image_filename'] if row else None
+
+        if not filename:
+            img_row = db.execute(
+                'SELECT query_image_filename FROM job_query_images '
+                'WHERE job_id = ? ORDER BY created_at LIMIT 1',
+                (job_id,)
+            ).fetchone()
+            if img_row:
+                filename = img_row['query_image_filename']
+
+        if not filename:
+            return None
+
+        file_path = os.path.join(current_app.instance_path, 'uploads', filename)
+        if not os.path.exists(file_path):
+            current_app.logger.warning(f"Query image not found on disk: {file_path}")
+            return None
+
+        with open(file_path, 'rb') as fh:
+            return BytesIO(fh.read())
+    except Exception as exc:
+        current_app.logger.warning(f"Could not load query image for job {job_id}: {exc}")
+        return None
+
+
 def _get_road_route(coordinates, mapbox_token):
     """
     Call the Mapbox Directions API to get a road-following route.
@@ -325,7 +454,7 @@ def _generate_document_signature(data, secret_key=None):
     }
 
 
-def _create_court_ready_pdf(case_metadata, sightings, map_image, signature_info=None, camera_coords=None, track_map_image=None, track_id=None):
+def _create_court_ready_pdf(case_metadata, sightings, map_image, signature_info=None, camera_coords=None, track_map_image=None, track_id=None, job_id=None):
     """
     Create a court-ready PDF report.
 
@@ -335,6 +464,8 @@ def _create_court_ready_pdf(case_metadata, sightings, map_image, signature_info=
     pdf_buffer = BytesIO()
     doc = SimpleDocTemplate(pdf_buffer, pagesize=letter, topMargin=0.5 * inch, bottomMargin=0.5 * inch)
     elements = []
+
+    frame_map = _fetch_frame_images(job_id)
 
     styles = getSampleStyleSheet()
 
@@ -389,7 +520,189 @@ def _create_court_ready_pdf(case_metadata, sightings, map_image, signature_info=
     elements.append(Paragraph(summary_text, styles['Normal']))
     elements.append(Spacer(1, 0.5 * inch))
 
-    # === PAGE 2: MAP (optional) ===
+    # === SIGHTINGS TABLE ===
+    elements.append(PageBreak())
+    elements.append(Paragraph('VEHICLE SIGHTINGS', heading_style))
+    elements.append(Spacer(1, 0.15 * inch))
+
+    FRAME_W = 1.9  # thumbnail display width in inches
+    FRAME_H = 1.3  # thumbnail display height in inches
+
+    sightings_data = [['#', 'Time / Offset', 'Camera Name', 'Coordinates', 'Confidence', 'Frame']]
+    for idx, sighting in enumerate(sightings, 1):
+        raw_ts = str(sighting.get('timestamp', ''))
+        try:
+            sec = float(raw_ts)
+            mins = int(sec // 60)
+            secs = int(sec % 60)
+            display_ts = f"{mins}m {secs}s" if mins else f"{secs}s"
+        except ValueError:
+            display_ts = raw_ts[:19]
+
+        camera_id = sighting.get('camera_id', '')
+        camera_name = sighting.get('camera_name', '')
+
+        coords = "Unknown"
+        if camera_coords and camera_id in camera_coords:
+            c = camera_coords[camera_id]
+            if c.get('latitude') is not None and c.get('longitude') is not None:
+                coords = f"{c['latitude']:.5f}, {c['longitude']:.5f}"
+
+        data_uri = _lookup_frame_image(sighting, frame_map)
+        frame_cell = _decode_frame_image(data_uri, FRAME_W, FRAME_H)
+        if frame_cell is None:
+            frame_cell = Paragraph('<i>N/A</i>', styles['Normal'])
+
+        sightings_data.append([
+            str(idx),
+            display_ts,
+            camera_name,
+            coords,
+            f"{sighting.get('match_score', 0):.1f}%",
+            frame_cell,
+        ])
+
+    sightings_table = Table(
+        sightings_data,
+        colWidths=[0.4 * inch, 1.0 * inch, 1.0 * inch, 1.3 * inch, 0.8 * inch, 2.0 * inch]
+    )
+    sightings_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2d5aa6')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+        ('ALIGN', (0, 1), (-1, -1), 'LEFT'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 10),
+        ('FONTSIZE', (0, 1), (-1, -1), 9),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('GRID', (0, 0), (-1, -1), 1, colors.grey),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f5f5f5')]),
+    ]))
+    elements.append(sightings_table)
+
+    # === HIGHEST CONFIDENCE DETECTIONS BY CAMERA ===
+    # Find the single best sighting per camera_id
+    cameras_best = {}
+    for sighting in sightings:
+        cam_id = sighting.get('camera_id', '')
+        if cam_id not in cameras_best or sighting.get('match_score', 0.0) > cameras_best[cam_id].get('match_score', 0.0):
+            cameras_best[cam_id] = sighting
+
+    if cameras_best:
+        elements.append(PageBreak())
+        elements.append(Paragraph('HIGHEST CONFIDENCE DETECTIONS BY CAMERA', heading_style))
+        elements.append(Spacer(1, 0.1 * inch))
+
+        # Read query image bytes once; create a fresh BytesIO per Image object to avoid seek issues
+        query_img_bytes = None
+        raw_query = _fetch_query_image_data(job_id)
+        if raw_query:
+            query_img_bytes = raw_query.read()
+
+        caption_style = ParagraphStyle(
+            'Caption', parent=styles['Normal'],
+            alignment=1, fontSize=9, textColor=colors.HexColor('#444444'), spaceBefore=4
+        )
+        cam_heading_style = ParagraphStyle(
+            'CamHeading', parent=styles['Heading3'],
+            fontSize=11, textColor=colors.HexColor('#1f4788'), spaceBefore=10, spaceAfter=6
+        )
+
+        IMG_W = 3.0  # image display width in inches
+        IMG_H = 2.1  # image display height in inches
+
+        # Sort cameras by their best score descending
+        sorted_bests = sorted(
+            cameras_best.values(),
+            key=lambda s: s.get('match_score', 0.0),
+            reverse=True
+        )
+
+        for idx, best in enumerate(sorted_bests):
+            cam_id_best = best.get('camera_id', '')
+            cam_name_best = best.get('camera_name', cam_id_best or 'Unknown Camera')
+            conf_best = best.get('match_score', 0.0)
+
+            raw_ts_best = str(best.get('timestamp', ''))
+            try:
+                sec_b = float(raw_ts_best)
+                mins_b = int(sec_b // 60)
+                secs_b = int(sec_b % 60)
+                display_ts_best = f"{mins_b}m {secs_b}s" if mins_b else f"{secs_b}s"
+            except ValueError:
+                display_ts_best = raw_ts_best[:19]
+
+            coords_best = 'Unknown'
+            if camera_coords and cam_id_best in camera_coords:
+                c = camera_coords[cam_id_best]
+                if c.get('latitude') is not None and c.get('longitude') is not None:
+                    coords_best = f"{c['latitude']:.5f}, {c['longitude']:.5f}"
+
+            # Query image — fresh BytesIO each time so ReportLab reads from position 0
+            query_cell_img = None
+            if query_img_bytes:
+                try:
+                    query_cell_img = Image(BytesIO(query_img_bytes), width=IMG_W * inch, height=IMG_H * inch)
+                except Exception as exc:
+                    current_app.logger.warning(f"Could not render query image: {exc}")
+            query_cell = query_cell_img or Paragraph('<i>Query image unavailable</i>', styles['Normal'])
+
+            # Best frame for this camera
+            best_frame_img = _decode_frame_image(_lookup_frame_image(best, frame_map), IMG_W, IMG_H)
+            frame_cell = best_frame_img or Paragraph('<i>Frame unavailable</i>', styles['Normal'])
+
+            comparison_table = Table(
+                [
+                    [query_cell, frame_cell],
+                    [Paragraph('<b>Query Image</b>', caption_style),
+                     Paragraph(f'<b>Best Match Frame ({conf_best:.1f}%)</b>', caption_style)],
+                ],
+                colWidths=[3.25 * inch, 3.25 * inch]
+            )
+            comparison_table.setStyle(TableStyle([
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('VALIGN', (0, 0), (-1, 0), 'MIDDLE'),
+                ('VALIGN', (0, 1), (-1, 1), 'TOP'),
+                ('GRID', (0, 0), (-1, 0), 0.5, colors.HexColor('#cccccc')),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 6),
+                ('TOPPADDING', (0, 0), (-1, 0), 6),
+                ('BOTTOMPADDING', (0, 1), (-1, 1), 4),
+                ('TOPPADDING', (0, 1), (-1, 1), 2),
+            ]))
+
+            detail_data = [
+                ['Time / Offset', 'Camera Name', 'Coordinates', 'Confidence'],
+                [display_ts_best, cam_name_best, coords_best, f"{conf_best:.1f}%"],
+            ]
+            detail_table = Table(
+                detail_data,
+                colWidths=[1.5 * inch, 1.5 * inch, 2.0 * inch, 1.5 * inch]
+            )
+            detail_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2d5aa6')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 10),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
+                ('TOPPADDING', (0, 0), (-1, -1), 10),
+                ('GRID', (0, 0), (-1, -1), 1, colors.grey),
+                ('BACKGROUND', (0, 1), (-1, 1), colors.HexColor('#eaf2ff')),
+            ]))
+
+            cam_block = KeepTogether([
+                Paragraph(f'Camera: {cam_name_best}', cam_heading_style),
+                comparison_table,
+                Spacer(1, 0.1 * inch),
+                detail_table,
+            ])
+            elements.append(cam_block)
+            if idx < len(sorted_bests) - 1:
+                elements.append(Spacer(1, 0.3 * inch))
+
+    # === VEHICLE ROUTE MAP (optional) ===
     if map_image:
         elements.append(PageBreak())
         elements.append(Paragraph('VEHICLE ROUTE MAP', heading_style))
@@ -407,7 +720,7 @@ def _create_court_ready_pdf(case_metadata, sightings, map_image, signature_info=
             styles['Italic']
         ))
 
-    # === TRACK ROUTE MAP (optional — allocated track) ===
+    # === ALLOCATED TRACK — CAMERA ROUTE (optional) ===
     if track_map_image:
         elements.append(PageBreak())
         elements.append(Paragraph('ALLOCATED TRACK — CAMERA ROUTE', heading_style))
@@ -426,86 +739,6 @@ def _create_court_ready_pdf(case_metadata, sightings, map_image, signature_info=
             'Green pin: Last camera sighting | Blue line: Vehicle route</i>',
             styles['Italic']
         ))
-
-    # === SIGHTINGS TABLE ===
-    elements.append(PageBreak())
-    elements.append(Paragraph('VEHICLE SIGHTINGS', heading_style))
-    elements.append(Spacer(1, 0.15 * inch))
-
-    sightings_data = [['#', 'Time / Offset', 'Camera Name', 'Coordinates', 'Confidence', 'Officer Notes']]
-    for idx, sighting in enumerate(sightings, 1):
-        # timestamp may be a raw seconds float in the flat format
-        raw_ts = str(sighting.get('timestamp', ''))
-        try:
-            sec = float(raw_ts)
-            mins = int(sec // 60)
-            secs = int(sec % 60)
-            display_ts = f"{mins}m {secs}s" if mins else f"{secs}s"
-        except ValueError:
-            display_ts = raw_ts[:19]  # ISO timestamp, strip microseconds/Z
-
-        camera_id = sighting.get('camera_id', '')
-        camera_name = sighting.get('camera_name', '')
-        
-        coords = "Unknown"
-        if camera_coords and camera_id in camera_coords:
-            c = camera_coords[camera_id]
-            if c.get('latitude') is not None and c.get('longitude') is not None:
-                coords = f"{c['latitude']:.5f}, {c['longitude']:.5f}"
-
-        sightings_data.append([
-            str(idx),
-            display_ts,
-            camera_name,
-            coords,
-            f"{sighting.get('match_score', 0):.1f}%",
-            sighting.get('officer_note', '') or sighting.get('officer_notes', ''),
-        ])
-
-    sightings_table = Table(
-        sightings_data,
-        colWidths=[0.5 * inch, 1.2 * inch, 0.9 * inch, 1.5 * inch, 0.9 * inch, 1.5 * inch]
-    )
-    sightings_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2d5aa6')),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
-        ('ALIGN', (0, 1), (-1, -1), 'LEFT'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 10),
-        ('FONTSIZE', (0, 1), (-1, -1), 9),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-        ('TOPPADDING', (0, 0), (-1, -1), 8),
-        ('GRID', (0, 0), (-1, -1), 1, colors.grey),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f5f5f5')]),
-    ]))
-    elements.append(sightings_table)
-
-    # === OFFICER NOTES PAGE ===
-    elements.append(PageBreak())
-    elements.append(Paragraph('OFFICER NOTES', heading_style))
-    elements.append(Spacer(1, 0.2 * inch))
-
-    notes_by_sighting = []
-    for sighting in sightings:
-        note = sighting.get('officer_note', '') or sighting.get('officer_notes', '')
-        if note:
-            raw_ts = str(sighting.get('timestamp', ''))
-            try:
-                sec = float(raw_ts)
-                mins = int(sec // 60)
-                secs = int(sec % 60)
-                display_ts = f"{mins}m {secs}s" if mins else f"{secs}s"
-            except ValueError:
-                display_ts = raw_ts[:19]
-            camera_name = sighting.get('camera_name', '')
-            notes_by_sighting.append(f"<b>{display_ts} - {camera_name}:</b> {note}")
-
-    if notes_by_sighting:
-        notes_html = '<br/><br/>'.join(notes_by_sighting)
-        elements.append(Paragraph(notes_html, styles['Normal']))
-    else:
-        elements.append(Paragraph('<i>No officer notes provided.</i>', styles['Italic']))
 
     # === SIGNATURE PAGE (final report only) ===
     if signature_info:
@@ -552,12 +785,13 @@ def _extract_csv_and_meta(request_obj):
     Supports multipart/form-data (file in 'csv' field + extra fields)
     and application/json ({'csv': '...', 'case_number': '...', ...}).
 
-    Returns (csv_text, case_number, officer_name, track_id) – any may be None.
+    Returns (csv_text, case_number, officer_name, track_id, job_id) – any may be None.
     """
     csv_text = None
     case_number = None
     officer_name = None
     track_id = None
+    job_id = None
 
     if request_obj.files:
         csv_file = request_obj.files.get('csv')
@@ -569,6 +803,7 @@ def _extract_csv_and_meta(request_obj):
         case_number = request_obj.form.get('case_number') or None
         officer_name = request_obj.form.get('officer_name') or None
         track_id = request_obj.form.get('track_id') or None
+        job_id = request_obj.form.get('job_id') or None
 
     if not csv_text and request_obj.is_json:
         data = request_obj.get_json(force=True, silent=True)
@@ -577,8 +812,9 @@ def _extract_csv_and_meta(request_obj):
             case_number = case_number or data.get('case_number')
             officer_name = officer_name or data.get('officer_name')
             track_id = track_id or data.get('track_id')
+            job_id = job_id or data.get('job_id')
 
-    return csv_text, case_number, officer_name, track_id
+    return csv_text, case_number, officer_name, track_id, job_id
 
 
 # ---------------------------------------------------------------------------
@@ -598,7 +834,7 @@ def preview_report():
     Returns a PDF binary (no digital signature – preview only).
     """
     try:
-        csv_text, case_number, officer_name, track_id = _extract_csv_and_meta(request)
+        csv_text, case_number, officer_name, track_id, job_id = _extract_csv_and_meta(request)
 
         if not csv_text:
             return jsonify({'error': 'CSV file or csv field is required'}), 400
@@ -610,7 +846,7 @@ def preview_report():
         if not included:
             included = all_sightings  # fall back to all rows
 
-        included.sort(key=lambda x: str(x.get('timestamp', '')))
+        included.sort(key=_ts_sort_key)
 
         # Optional map (won't block PDF generation if it fails)
         camera_ids = list({s.get('camera_id') for s in included if s.get('camera_id')})
@@ -633,6 +869,7 @@ def preview_report():
             camera_coords=camera_coords,
             track_map_image=track_map_image,
             track_id=track_id,
+            job_id=job_id,
         )
 
         return send_file(
@@ -667,7 +904,7 @@ def generate_report():
     5. Build multi-page PDF with digital signature
     """
     try:
-        csv_text, case_number, officer_name, track_id = _extract_csv_and_meta(request)
+        csv_text, case_number, officer_name, track_id, job_id = _extract_csv_and_meta(request)
 
         if not csv_text:
             return jsonify({'error': 'CSV file or csv field is required'}), 400
@@ -682,7 +919,7 @@ def generate_report():
         if not included_sightings:
             return jsonify({'error': 'CSV contains no sightings data'}), 400
 
-        included_sightings.sort(key=lambda x: str(x.get('timestamp', '')))
+        included_sightings.sort(key=_ts_sort_key)
 
         # Camera GPS coords + optional Mapbox map
         camera_ids = list({s.get('camera_id') for s in included_sightings if s.get('camera_id')})
@@ -713,16 +950,16 @@ def generate_report():
             camera_coords=camera_coords,
             track_map_image=track_map_image,
             track_id=track_id,
+            job_id=job_id,
         )
 
         # Persist the chosen track against the job (best-effort, never blocks PDF download)
-        job_id_from_form = request.form.get('job_id') or None
-        if track_id and job_id_from_form:
+        if track_id and job_id:
             try:
                 db = get_db()
                 db.execute(
                     'UPDATE jobs SET selected_track_id = ? WHERE id = ?',
-                    (track_id, job_id_from_form)
+                    (track_id, job_id)
                 )
                 db.commit()
             except Exception as _e:
