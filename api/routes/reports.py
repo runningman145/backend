@@ -277,6 +277,85 @@ def _ts_sort_key(sighting):
         return (1, 0.0, str(ts))
 
 
+def _fetch_detection_timestamps(job_id):
+    """
+    Return a dict mapping (timestamp_float, camera_id_str) -> wall-clock display string
+    by joining vehicle_detections with detections.captured_at.
+
+    Replicates Track Explorer's _fmt_detection_ts logic:
+      - vd.timestamp > 1e9  →  absolute UTC epoch  →  "YYYY-MM-DD HH:MM:SS"
+      - otherwise           →  detections.captured_at (recording session wall-clock time)
+
+    Returns {} on any failure so callers fall back gracefully.
+    """
+    if not job_id:
+        return {}
+    try:
+        db = get_db()
+        rows = db.execute(
+            '''SELECT vd.timestamp, vd.camera_id, d.captured_at
+               FROM vehicle_detections vd
+               JOIN detections d ON vd.detection_id = d.id
+               WHERE vd.job_id = ?''',
+            (job_id,)
+        ).fetchall()
+        ts_map = {}
+        for row in rows:
+            try:
+                t = float(row['timestamp'])
+                cam_id = str(row['camera_id'])
+                captured_at = row['captured_at']
+                if t > 1_000_000_000:
+                    from datetime import timezone as _tz
+                    display = datetime.fromtimestamp(t, tz=_tz.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+                else:
+                    display = captured_at
+                if display:
+                    ts_map[(t, cam_id)] = str(display)
+            except (TypeError, ValueError):
+                continue
+        return ts_map
+    except Exception as exc:
+        current_app.logger.warning(f"Could not fetch detection timestamps for job {job_id}: {exc}")
+        return {}
+
+
+def _format_display_ts(sighting, ts_map):
+    """
+    Return the best available timestamp string for a sighting.
+
+    Tries the wall-clock time from ts_map (same source as Track Explorer) first,
+    then falls back to a video-offset string ("1m 30s") derived from the float timestamp.
+    """
+    if ts_map:
+        try:
+            ts_float = float(sighting.get('timestamp', ''))
+            cam_id = str(sighting.get('camera_id', ''))
+            # Exact match
+            if (ts_float, cam_id) in ts_map:
+                return ts_map[(ts_float, cam_id)]
+            # Approximate match ±0.01 s, same camera
+            for (fts, fcam), display in ts_map.items():
+                if fcam == cam_id and abs(fts - ts_float) <= 0.01:
+                    return display
+            # Any-camera approximate (single-camera job fallback)
+            for (fts, _fcam), display in ts_map.items():
+                if abs(fts - ts_float) <= 0.01:
+                    return display
+        except (ValueError, TypeError):
+            pass
+
+    # Fallback: format as video offset
+    raw_ts = str(sighting.get('timestamp', ''))
+    try:
+        sec = float(raw_ts)
+        mins = int(sec // 60)
+        secs = int(sec % 60)
+        return f"{mins}m {secs}s" if mins else f"{secs}s"
+    except ValueError:
+        return raw_ts[:19]
+
+
 def _fetch_query_image_data(job_id):
     """
     Return a BytesIO of the job's query image file, or None if unavailable.
@@ -466,6 +545,7 @@ def _create_court_ready_pdf(case_metadata, sightings, map_image, signature_info=
     elements = []
 
     frame_map = _fetch_frame_images(job_id)
+    ts_map = _fetch_detection_timestamps(job_id)
 
     styles = getSampleStyleSheet()
 
@@ -528,16 +608,9 @@ def _create_court_ready_pdf(case_metadata, sightings, map_image, signature_info=
     FRAME_W = 1.9  # thumbnail display width in inches
     FRAME_H = 1.3  # thumbnail display height in inches
 
-    sightings_data = [['#', 'Time / Offset', 'Camera Name', 'Coordinates', 'Confidence', 'Frame']]
+    sightings_data = [['#', 'Detection Time', 'Camera Name', 'Coordinates', 'Confidence', 'Frame']]
     for idx, sighting in enumerate(sightings, 1):
-        raw_ts = str(sighting.get('timestamp', ''))
-        try:
-            sec = float(raw_ts)
-            mins = int(sec // 60)
-            secs = int(sec % 60)
-            display_ts = f"{mins}m {secs}s" if mins else f"{secs}s"
-        except ValueError:
-            display_ts = raw_ts[:19]
+        display_ts = _format_display_ts(sighting, ts_map)
 
         camera_id = sighting.get('camera_id', '')
         camera_name = sighting.get('camera_name', '')
@@ -625,14 +698,7 @@ def _create_court_ready_pdf(case_metadata, sightings, map_image, signature_info=
             cam_name_best = best.get('camera_name', cam_id_best or 'Unknown Camera')
             conf_best = best.get('match_score', 0.0)
 
-            raw_ts_best = str(best.get('timestamp', ''))
-            try:
-                sec_b = float(raw_ts_best)
-                mins_b = int(sec_b // 60)
-                secs_b = int(sec_b % 60)
-                display_ts_best = f"{mins_b}m {secs_b}s" if mins_b else f"{secs_b}s"
-            except ValueError:
-                display_ts_best = raw_ts_best[:19]
+            display_ts_best = _format_display_ts(best, ts_map)
 
             coords_best = 'Unknown'
             if camera_coords and cam_id_best in camera_coords:
@@ -673,7 +739,7 @@ def _create_court_ready_pdf(case_metadata, sightings, map_image, signature_info=
             ]))
 
             detail_data = [
-                ['Time / Offset', 'Camera Name', 'Coordinates', 'Confidence'],
+                ['Detection Time', 'Camera Name', 'Coordinates', 'Confidence'],
                 [display_ts_best, cam_name_best, coords_best, f"{conf_best:.1f}%"],
             ]
             detail_table = Table(
