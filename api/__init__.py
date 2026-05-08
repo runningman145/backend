@@ -1,6 +1,9 @@
 import os
 
+from dotenv import load_dotenv
 from flask import Flask
+
+load_dotenv()  # load backend/.env into os.environ before anything reads it
 
 from . import db
 from . import extensions
@@ -19,6 +22,7 @@ def create_app(test_config=None):
         REID_MODEL_PATH=os.getenv('REID_MODEL_PATH'),  # Path to trained ReID model
         # Full path to ffmpeg.exe when the server process PATH omits it (common under IDEs).
         FFMPEG_PATH=os.getenv('FFMPEG_PATH') or os.getenv('FFMPEG_BINARY'),
+        MAPBOX_ACCESS_TOKEN=os.getenv('MAPBOX_ACCESS_TOKEN'),
     )
 
     if os.getenv("DATABASE"):

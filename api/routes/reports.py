@@ -9,6 +9,7 @@ import hmac
 import requests
 from datetime import datetime
 from io import BytesIO, StringIO
+from urllib.parse import quote
 from flask import Blueprint, jsonify, request, send_file, current_app
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
@@ -141,11 +142,76 @@ def _fetch_camera_coordinates(camera_ids):
 
     coords = {}
     for row in rows:
-        coords[row['id']] = {
-            'latitude': row['latitude'],
-            'longitude': row['longitude']
-        }
+        try:
+            lat = float(row['latitude']) if row['latitude'] is not None else None
+            lon = float(row['longitude']) if row['longitude'] is not None else None
+        except (TypeError, ValueError):
+            lat, lon = None, None
+        coords[row['id']] = {'latitude': lat, 'longitude': lon}
     return coords
+
+
+def _fetch_track_sightings(track_id):
+    """Fetch ordered sightings for a track; returns list compatible with _generate_mapbox_map."""
+    try:
+        db = get_db()
+        rows = db.execute(
+            '''SELECT vd.timestamp, vd.match_score,
+                      c.id as camera_id, c.name as camera_name,
+                      c.latitude, c.longitude
+               FROM track_detections td
+               JOIN vehicle_detections vd ON td.vehicle_detection_id = vd.id
+               JOIN cameras c ON vd.camera_id = c.id
+               WHERE td.track_id = ?
+               ORDER BY vd.timestamp ASC''',
+            (track_id,)
+        ).fetchall()
+        sightings = []
+        for r in rows:
+            try:
+                lat = float(r['latitude']) if r['latitude'] is not None else None
+                lon = float(r['longitude']) if r['longitude'] is not None else None
+            except (TypeError, ValueError):
+                lat, lon = None, None
+            sightings.append({
+                'camera_id': r['camera_id'],
+                'camera_name': r['camera_name'],
+                'latitude': lat,
+                'longitude': lon,
+                'timestamp': r['timestamp'],
+                'confidence': r['match_score'],
+            })
+        return sightings
+    except Exception as exc:
+        current_app.logger.warning(f"Could not fetch sightings for track {track_id}: {exc}")
+        return []
+
+
+def _get_road_route(coordinates, mapbox_token):
+    """
+    Call the Mapbox Directions API to get a road-following route.
+
+    coordinates: list of [lon, lat] pairs (at least 2).
+    Returns a list of [lon, lat] pairs following actual roads, or the original
+    straight-line coordinates if the API call fails.
+    """
+    coord_str = ";".join(f"{lon},{lat}" for lon, lat in coordinates)
+    url = (
+        f"https://api.mapbox.com/directions/v5/mapbox/driving/{coord_str}"
+        f"?geometries=geojson&overview=full&access_token={mapbox_token}"
+    )
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        routes = data.get("routes", [])
+        if routes:
+            road_coords = routes[0]["geometry"]["coordinates"]
+            if len(road_coords) > 1:
+                return road_coords
+    except Exception as exc:
+        current_app.logger.warning(f"Directions API failed, using straight line: {exc}")
+    return coordinates
 
 
 def _generate_mapbox_map(sightings, camera_coords, mapbox_token=None):
@@ -179,22 +245,42 @@ def _generate_mapbox_map(sightings, camera_coords, mapbox_token=None):
         current_app.logger.warning("Not enough valid sighting coordinates for map – skipping")
         return None
 
+    # Get road-following route geometry from Mapbox Directions API.
+    # Falls back to straight-line coordinates if the API call fails.
+    road_coordinates = _get_road_route(coordinates, mapbox_token)
+
+    # Bounding box derived from the camera pin locations (not the road geometry)
+    # so padding is based on the actual camera spread, not route detours.
     lons = [c[0] for c in coordinates]
     lats = [c[1] for c in coordinates]
     min_lon, max_lon = min(lons), max(lons)
     min_lat, max_lat = min(lats), max(lats)
-    lon_padding = (max_lon - min_lon) * 0.1 or 0.01
-    lat_padding = (max_lat - min_lat) * 0.1 or 0.01
 
-    polyline = ";".join(f"{lon},{lat}" for lon, lat in coordinates)
-    overlay_parts = [f"path-3+0000FF-0.5({polyline})"]
+    # Pad by 50% of the span on each side, with a minimum of ~0.008° (~900 m) so
+    # tightly-clustered cameras still get a readable street-level view.
+    lon_padding = max((max_lon - min_lon) * 0.5, 0.008)
+    lat_padding = max((max_lat - min_lat) * 0.5, 0.008)
+    bbox = (
+        f"[{min_lon - lon_padding:.6f},{min_lat - lat_padding:.6f},"
+        f"{max_lon + lon_padding:.6f},{max_lat + lat_padding:.6f}]"
+    )
+
+    # GeoJSON LineString overlay — the only path format Mapbox Static Images API
+    # reliably supports (raw semicolon-separated coordinates are not valid).
+    line_geojson = {
+        "type": "Feature",
+        "properties": {"stroke": "#0000FF", "stroke-width": 3, "stroke-opacity": 0.8},
+        "geometry": {"type": "LineString", "coordinates": road_coordinates},
+    }
+    path_overlay = f"geojson({quote(json.dumps(line_geojson, separators=(',', ':')), safe='')})"
+    overlay_parts = [path_overlay]
     overlay_parts.extend(pins)
-    overlay = "/".join(overlay_parts)
+    overlay = ",".join(overlay_parts)
 
     url = (
         f"https://api.mapbox.com/styles/v1/mapbox/streets-v12/static/"
         f"{overlay}/"
-        f"auto/800x600@2x"
+        f"{bbox}/800x600@2x"
         f"?access_token={mapbox_token}"
     )
 
@@ -228,7 +314,7 @@ def _generate_document_signature(data, secret_key=None):
     }
 
 
-def _create_court_ready_pdf(case_metadata, sightings, map_image, signature_info=None, camera_coords=None):
+def _create_court_ready_pdf(case_metadata, sightings, map_image, signature_info=None, camera_coords=None, track_map_image=None, track_id=None):
     """
     Create a court-ready PDF report.
 
@@ -310,6 +396,26 @@ def _create_court_ready_pdf(case_metadata, sightings, map_image, signature_info=
             styles['Italic']
         ))
 
+    # === TRACK ROUTE MAP (optional — allocated track) ===
+    if track_map_image:
+        elements.append(PageBreak())
+        elements.append(Paragraph('ALLOCATED TRACK — CAMERA ROUTE', heading_style))
+        elements.append(Spacer(1, 0.15 * inch))
+        if track_id:
+            elements.append(Paragraph(f'<i>Track ID: {track_id}</i>', styles['Italic']))
+            elements.append(Spacer(1, 0.1 * inch))
+        try:
+            elements.append(Image(track_map_image, width=7 * inch, height=5.25 * inch))
+        except Exception as e:
+            current_app.logger.warning(f"Failed to embed track map image: {e}")
+            elements.append(Paragraph('<i>Track map image unavailable</i>', styles['Normal']))
+        elements.append(Spacer(1, 0.15 * inch))
+        elements.append(Paragraph(
+            '<i>Red pin: First camera sighting | Blue pins: Intermediate cameras | '
+            'Green pin: Last camera sighting | Blue line: Vehicle route</i>',
+            styles['Italic']
+        ))
+
     # === SIGHTINGS TABLE ===
     elements.append(PageBreak())
     elements.append(Paragraph('VEHICLE SIGHTINGS', heading_style))
@@ -333,7 +439,8 @@ def _create_court_ready_pdf(case_metadata, sightings, map_image, signature_info=
         coords = "Unknown"
         if camera_coords and camera_id in camera_coords:
             c = camera_coords[camera_id]
-            coords = f"{c['latitude']:.5f}, {c['longitude']:.5f}"
+            if c.get('latitude') is not None and c.get('longitude') is not None:
+                coords = f"{c['latitude']:.5f}, {c['longitude']:.5f}"
 
         sightings_data.append([
             str(idx),
@@ -429,16 +536,17 @@ def _create_court_ready_pdf(case_metadata, sightings, map_image, signature_info=
 
 def _extract_csv_and_meta(request_obj):
     """
-    Pull the CSV text, case_number, and officer_name out of the request.
+    Pull the CSV text, case_number, officer_name, and optional track_id out of the request.
 
     Supports multipart/form-data (file in 'csv' field + extra fields)
     and application/json ({'csv': '...', 'case_number': '...', ...}).
 
-    Returns (csv_text, case_number, officer_name) – any may be None.
+    Returns (csv_text, case_number, officer_name, track_id) – any may be None.
     """
     csv_text = None
     case_number = None
     officer_name = None
+    track_id = None
 
     if request_obj.files:
         csv_file = request_obj.files.get('csv')
@@ -449,6 +557,7 @@ def _extract_csv_and_meta(request_obj):
     if request_obj.form:
         case_number = request_obj.form.get('case_number') or None
         officer_name = request_obj.form.get('officer_name') or None
+        track_id = request_obj.form.get('track_id') or None
 
     if not csv_text and request_obj.is_json:
         data = request_obj.get_json(force=True, silent=True)
@@ -456,8 +565,9 @@ def _extract_csv_and_meta(request_obj):
             csv_text = data.get('csv')
             case_number = case_number or data.get('case_number')
             officer_name = officer_name or data.get('officer_name')
+            track_id = track_id or data.get('track_id')
 
-    return csv_text, case_number, officer_name
+    return csv_text, case_number, officer_name, track_id
 
 
 # ---------------------------------------------------------------------------
@@ -477,7 +587,7 @@ def preview_report():
     Returns a PDF binary (no digital signature – preview only).
     """
     try:
-        csv_text, case_number, officer_name = _extract_csv_and_meta(request)
+        csv_text, case_number, officer_name, track_id = _extract_csv_and_meta(request)
 
         if not csv_text:
             return jsonify({'error': 'CSV file or csv field is required'}), 400
@@ -496,8 +606,22 @@ def preview_report():
         camera_coords = _fetch_camera_coordinates(camera_ids) if camera_ids else {}
         map_image = _generate_mapbox_map(included, camera_coords) if camera_coords else None
 
+        # Track route map (optional — from allocated track)
+        track_map_image = None
+        if track_id:
+            track_sightings = _fetch_track_sightings(track_id)
+            if track_sightings:
+                track_camera_coords = {
+                    s['camera_id']: {'latitude': s['latitude'], 'longitude': s['longitude']}
+                    for s in track_sightings
+                }
+                track_map_image = _generate_mapbox_map(track_sightings, track_camera_coords)
+
         pdf_buffer = _create_court_ready_pdf(
-            case_metadata, included, map_image, signature_info=None, camera_coords=camera_coords
+            case_metadata, included, map_image, signature_info=None,
+            camera_coords=camera_coords,
+            track_map_image=track_map_image,
+            track_id=track_id,
         )
 
         return send_file(
@@ -532,7 +656,7 @@ def generate_report():
     5. Build multi-page PDF with digital signature
     """
     try:
-        csv_text, case_number, officer_name = _extract_csv_and_meta(request)
+        csv_text, case_number, officer_name, track_id = _extract_csv_and_meta(request)
 
         if not csv_text:
             return jsonify({'error': 'CSV file or csv field is required'}), 400
@@ -554,6 +678,17 @@ def generate_report():
         camera_coords = _fetch_camera_coordinates(camera_ids) if camera_ids else {}
         map_image = _generate_mapbox_map(included_sightings, camera_coords) if camera_coords else None
 
+        # Track route map (optional — from allocated track)
+        track_map_image = None
+        if track_id:
+            track_sightings = _fetch_track_sightings(track_id)
+            if track_sightings:
+                track_camera_coords = {
+                    s['camera_id']: {'latitude': s['latitude'], 'longitude': s['longitude']}
+                    for s in track_sightings
+                }
+                track_map_image = _generate_mapbox_map(track_sightings, track_camera_coords)
+
         # Digital signature
         signature_data = {
             'case_number': case_metadata.get('case_number'),
@@ -563,8 +698,24 @@ def generate_report():
         signature_info = _generate_document_signature(signature_data)
 
         pdf_buffer = _create_court_ready_pdf(
-            case_metadata, included_sightings, map_image, signature_info, camera_coords
+            case_metadata, included_sightings, map_image, signature_info,
+            camera_coords=camera_coords,
+            track_map_image=track_map_image,
+            track_id=track_id,
         )
+
+        # Persist the chosen track against the job (best-effort, never blocks PDF download)
+        job_id_from_form = request.form.get('job_id') or None
+        if track_id and job_id_from_form:
+            try:
+                db = get_db()
+                db.execute(
+                    'UPDATE jobs SET selected_track_id = ? WHERE id = ?',
+                    (track_id, job_id_from_form)
+                )
+                db.commit()
+            except Exception as _e:
+                current_app.logger.warning(f"Could not persist selected_track_id: {_e}")
 
         return send_file(
             pdf_buffer,
