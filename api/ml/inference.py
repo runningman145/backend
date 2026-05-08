@@ -239,7 +239,7 @@ def process_video_data(video_data, yolo_model, reid_model, transform_func, devic
                 small_frame = cv2.resize(frame, (MODEL_CONFIG['YOLO_IMGSZ'], MODEL_CONFIG['YOLO_IMGSZ']))
 
                 # Run YOLO detection
-                detections = yolo_model(small_frame, imgsz=MODEL_CONFIG['YOLO_IMGSZ'], verbose=False)[0]
+                detections = yolo_model(small_frame, imgsz=MODEL_CONFIG['YOLO_IMGSZ'], conf=MODEL_CONFIG['YOLO_CONF'], verbose=False)[0]
 
                 # -------------------------------------------------------- #
                 # Collect all valid vehicle crops for this frame            #
@@ -419,7 +419,7 @@ def process_image_for_matching(image_bytes, yolo_model, reid_model, transform_fu
     small_img = cv2.resize(img, (MODEL_CONFIG['YOLO_IMGSZ'], MODEL_CONFIG['YOLO_IMGSZ']))
     
     # Run detection
-    detections = yolo_model(small_img, imgsz=MODEL_CONFIG['YOLO_IMGSZ'], verbose=False)[0]
+    detections = yolo_model(small_img, imgsz=MODEL_CONFIG['YOLO_IMGSZ'], conf=MODEL_CONFIG['YOLO_CONF'], verbose=False)[0]
     
     vehicles = []
     
