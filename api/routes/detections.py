@@ -508,13 +508,37 @@ def detection_stats():
         ORDER BY date DESC
     ''').fetchall()
     
-    # Get average match score
+    # Get average match score from vehicle_detections
     avg_score = db.execute('''
-        SELECT AVG(match_score) as avg_score 
-        FROM detections 
+        SELECT AVG(match_score) as avg_score
+        FROM vehicle_detections
         WHERE match_score IS NOT NULL
     ''').fetchone()['avg_score']
-    
+
+    # Get match confidence distribution from vehicle_detections
+    confidence_dist_rows = db.execute('''
+        SELECT
+            CASE
+                WHEN match_score >= 90 THEN '90-100%'
+                WHEN match_score >= 80 THEN '80-90%'
+                WHEN match_score >= 70 THEN '70-80%'
+                ELSE 'Below 70%'
+            END as score_range,
+            COUNT(*) as count
+        FROM vehicle_detections
+        WHERE match_score IS NOT NULL
+        GROUP BY score_range
+    ''').fetchall()
+
+    # Build ordered distribution list
+    dist_map = {row['score_range']: row['count'] for row in confidence_dist_rows}
+    confidence_distribution = [
+        {'label': '90-100%', 'value': dist_map.get('90-100%', 0)},
+        {'label': '80-90%',  'value': dist_map.get('80-90%', 0)},
+        {'label': '70-80%',  'value': dist_map.get('70-80%', 0)},
+        {'label': 'Below 70%', 'value': dist_map.get('Below 70%', 0)},
+    ]
+
     return jsonify({
         'total_detections': total,
         'average_match_score': round(avg_score, 2) if avg_score else None,
@@ -525,5 +549,6 @@ def detection_stats():
         'detections_by_date': [
             {'date': row['date'], 'count': row['count']}
             for row in by_date
-        ]
+        ],
+        'confidence_distribution': confidence_distribution,
     })

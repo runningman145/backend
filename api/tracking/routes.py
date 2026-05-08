@@ -170,7 +170,13 @@ def get_tracks_for_camera(camera_id, limit=50):
         db = get_db()
         tracks = db.execute(
             '''SELECT DISTINCT vt.id, vt.first_seen, vt.last_seen,
-                      COUNT(DISTINCT td.vehicle_detection_id) as detection_count
+                      (SELECT COUNT(DISTINCT td2.vehicle_detection_id)
+                       FROM track_detections td2
+                       WHERE td2.track_id = vt.id) as detection_count,
+                      (SELECT COUNT(DISTINCT vd2.camera_id)
+                       FROM track_detections td2
+                       JOIN vehicle_detections vd2 ON td2.vehicle_detection_id = vd2.id
+                       WHERE td2.track_id = vt.id) as camera_count
                FROM vehicle_tracks vt
                JOIN track_detections td ON vt.id = td.track_id
                JOIN vehicle_detections vd ON td.vehicle_detection_id = vd.id
@@ -180,13 +186,14 @@ def get_tracks_for_camera(camera_id, limit=50):
                LIMIT ?''',
             (camera_id, limit)
         ).fetchall()
-        
+
         return [
             {
                 'track_id': t['id'],
                 'first_seen': t['first_seen'],
                 'last_seen': t['last_seen'],
                 'detection_count': t['detection_count'],
+                'camera_count': t['camera_count'],
             }
             for t in tracks
         ]
