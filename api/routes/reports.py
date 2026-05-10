@@ -255,7 +255,7 @@ def _lookup_frame_image(sighting, frame_map):
     for (fts, fcam), img in frame_map.items():
         if fcam == cam_id and abs(fts - ts) <= 0.01:
             return img
-    for (fts, _fcam), img in frame_map.items():
+    for (fts, _), img in frame_map.items():
         if abs(fts - ts) <= 0.01:
             return img
     return None
@@ -533,11 +533,10 @@ def _generate_document_signature(data, secret_key=None):
     }
 
 
-def _create_court_ready_pdf(case_metadata, sightings, map_image, signature_info=None, camera_coords=None, track_map_image=None, track_id=None, job_id=None):
+def _create_court_ready_pdf(case_metadata, sightings, signature_info=None, camera_coords=None, track_map_image=None, track_id=None, job_id=None):
     """
     Create a court-ready PDF report.
 
-    map_image can be None – in that case the map page is omitted.
     signature_info can be None – in that case the signature page is omitted (preview mode).
     """
     pdf_buffer = BytesIO()
@@ -768,24 +767,6 @@ def _create_court_ready_pdf(case_metadata, sightings, map_image, signature_info=
             if idx < len(sorted_bests) - 1:
                 elements.append(Spacer(1, 0.3 * inch))
 
-    # === VEHICLE ROUTE MAP (optional) ===
-    if map_image:
-        elements.append(PageBreak())
-        elements.append(Paragraph('VEHICLE ROUTE MAP', heading_style))
-        elements.append(Spacer(1, 0.15 * inch))
-        try:
-            img = Image(map_image, width=7 * inch, height=5.25 * inch)
-            elements.append(img)
-        except Exception as e:
-            current_app.logger.warning(f"Failed to embed map image: {e}")
-            elements.append(Paragraph('<i>Map image unavailable</i>', styles['Normal']))
-        elements.append(Spacer(1, 0.15 * inch))
-        elements.append(Paragraph(
-            '<i>Red pin: First sighting | Blue pins: Intermediate sightings | '
-            'Green pin: Last sighting | Blue line: Route in chronological order</i>',
-            styles['Italic']
-        ))
-
     # === ALLOCATED TRACK — CAMERA ROUTE (optional) ===
     if track_map_image:
         elements.append(PageBreak())
@@ -914,10 +895,9 @@ def preview_report():
 
         included.sort(key=_ts_sort_key)
 
-        # Optional map (won't block PDF generation if it fails)
+        # Camera GPS coords (used for sightings table and allocated track map)
         camera_ids = list({s.get('camera_id') for s in included if s.get('camera_id')})
         camera_coords = _fetch_camera_coordinates(camera_ids) if camera_ids else {}
-        map_image = _generate_mapbox_map(included, camera_coords) if camera_coords else None
 
         # Track route map (optional — from allocated track)
         track_map_image = None
@@ -931,7 +911,7 @@ def preview_report():
                 track_map_image = _generate_mapbox_map(track_sightings, track_camera_coords)
 
         pdf_buffer = _create_court_ready_pdf(
-            case_metadata, included, map_image, signature_info=None,
+            case_metadata, included, signature_info=None,
             camera_coords=camera_coords,
             track_map_image=track_map_image,
             track_id=track_id,
@@ -987,10 +967,9 @@ def generate_report():
 
         included_sightings.sort(key=_ts_sort_key)
 
-        # Camera GPS coords + optional Mapbox map
+        # Camera GPS coords (used for sightings table and allocated track map)
         camera_ids = list({s.get('camera_id') for s in included_sightings if s.get('camera_id')})
         camera_coords = _fetch_camera_coordinates(camera_ids) if camera_ids else {}
-        map_image = _generate_mapbox_map(included_sightings, camera_coords) if camera_coords else None
 
         # Track route map (optional — from allocated track)
         track_map_image = None
@@ -1012,7 +991,7 @@ def generate_report():
         signature_info = _generate_document_signature(signature_data)
 
         pdf_buffer = _create_court_ready_pdf(
-            case_metadata, included_sightings, map_image, signature_info,
+            case_metadata, included_sightings, signature_info=signature_info,
             camera_coords=camera_coords,
             track_map_image=track_map_image,
             track_id=track_id,

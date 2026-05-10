@@ -434,7 +434,9 @@ def rerun_job(job_id):
     try:
         from ..jobs.models import get_job_query_images, create_batch_job, create_job
         import json as _json
- 
+        import shutil as _shutil
+        from datetime import datetime as _dt
+
         db = get_db()
         original_job = db.execute(
             '''SELECT id, camera_id, camera_ids, threshold, frame_skip, video_filename,
@@ -442,17 +444,61 @@ def rerun_job(job_id):
                FROM jobs WHERE id = ?''',
             (job_id,)
         ).fetchone()
- 
+
         if original_job is None:
             return jsonify({'error': 'Job not found'}), 404
- 
+
+        # Read optional overrides from the request body
+        data = request.get_json(silent=True) or {}
+        threshold = original_job['threshold']
+        frame_skip = original_job['frame_skip']
+        if 'threshold' in data:
+            t = float(data['threshold'])
+            if t <= 1.0:
+                t = t * 100  # 0-1 decimal → 0-100 percentage, same as upload endpoint
+            threshold = t
+        if 'frame_skip' in data:
+            frame_skip = int(data['frame_skip'])
+
+        upload_folder = os.path.join(current_app.instance_path, 'uploads')
+        os.makedirs(upload_folder, exist_ok=True)
+
+        def _copy_query_image(filename):
+            """Copy a query image to a fresh unique name so the new job owns its own file.
+            Returns the new filename, or None if the source no longer exists on disk."""
+            src = os.path.join(upload_folder, filename)
+            if not os.path.exists(src):
+                return None
+            # Strip the existing YYYYMMDD_HHMMSS_ prefix to keep the human-readable base name
+            parts = filename.split('_', 2)
+            base = parts[2] if (len(parts) >= 3 and len(parts[0]) == 8 and len(parts[1]) == 6) else filename
+            # %f gives microseconds — makes collisions between rapid reruns practically impossible
+            new_filename = _dt.now().strftime('%Y%m%d_%H%M%S%f_') + base
+            _shutil.copy2(src, os.path.join(upload_folder, new_filename))
+            return new_filename
+
         is_batch_job = original_job['video_filename'] is None
- 
+
         if is_batch_job:
             query_images = get_job_query_images(job_id)
             if not query_images:
                 return jsonify({'error': 'Batch job has no query images to rerun'}), 400
- 
+
+            # Copy each query image so the new job owns its own files.
+            # This prevents deleting the original job from breaking future reruns.
+            copied_images = []
+            for fname in query_images:
+                new_fname = _copy_query_image(fname)
+                if new_fname is None:
+                    return jsonify({
+                        'error': (
+                            'Cannot rerun: one or more query image files are no longer available '
+                            'on disk. The original files may have been deleted. '
+                            'Please submit a new job with fresh images.'
+                        )
+                    }), 409
+                copied_images.append(new_fname)
+
             # Restore camera_ids list if present
             camera_ids = None
             raw = original_job['camera_ids'] if 'camera_ids' in original_job.keys() else None
@@ -461,30 +507,40 @@ def rerun_job(job_id):
                     camera_ids = _json.loads(raw)
                 except Exception:
                     camera_ids = None
- 
+
             new_job_id = create_batch_job(
                 camera_id=original_job['camera_id'],
-                query_image_filenames=query_images,
-                threshold=original_job['threshold'],
-                frame_skip=original_job['frame_skip'],
+                query_image_filenames=copied_images,
+                threshold=threshold,
+                frame_skip=frame_skip,
                 job_date=original_job['job_date'],
                 start_time=original_job['start_time'],
                 end_time=original_job['end_time'],
                 camera_ids=camera_ids,
             )
         else:
+            orig_qimg = original_job['query_image_filename']
+            new_qimg = _copy_query_image(orig_qimg) if orig_qimg else None
+            if orig_qimg and new_qimg is None:
+                return jsonify({
+                    'error': (
+                        'Cannot rerun: query image file is no longer available on disk. '
+                        'Please submit a new job with fresh images.'
+                    )
+                }), 409
+
             new_job_id = create_job(
                 camera_id=original_job['camera_id'],
                 detection_id=original_job['detection_id'],
                 video_filename=original_job['video_filename'],
-                query_image_filename=original_job['query_image_filename'],
-                threshold=original_job['threshold'],
-                frame_skip=original_job['frame_skip'],
+                query_image_filename=new_qimg or orig_qimg,
+                threshold=threshold,
+                frame_skip=frame_skip,
                 job_date=original_job['job_date'],
                 start_time=original_job['start_time'],
                 end_time=original_job['end_time'],
             )
- 
+
         current_app.logger.info(f"Job {job_id} rerun as new job {new_job_id}")
         return jsonify({
             'new_job_id': new_job_id,
