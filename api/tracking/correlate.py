@@ -13,7 +13,7 @@ from ..ml.reid import cosine_similarity
 # Configuration for cross-camera correlation
 TRACKING_CONFIG = {
     'EMBEDDING_SIMILARITY_THRESHOLD': 0.65,  # Min cosine similarity to match
-    'TIME_WINDOW_SECONDS': 120,  # Max time between detections to be same vehicle
+    'TIME_WINDOW_SECONDS': 7200,  # Max time between detections to be same vehicle (2 hours)
     'MAX_DISTANCE_KM': 5,  # Max distance between cameras for correlation
     'SPATIAL_FILTER_ENABLED': True,  # Use camera location to help correlation
 }
