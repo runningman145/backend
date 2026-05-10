@@ -5,6 +5,7 @@ Correlates vehicle detections across cameras to build tracks.
 import json
 import numpy as np
 import uuid
+from datetime import datetime, timezone
 from flask import current_app
 from ..db import get_db
 from ..ml.reid import cosine_similarity
@@ -296,10 +297,17 @@ def post_correlate_batch_detections(job_id, db):
         first_cam = cameras[indices[0]]
         last_cam = cameras[indices[-1]]
 
+        group_ts = [timestamps[i] for i in indices if timestamps[i] > 1_000_000_000]
+        if group_ts:
+            first_seen = datetime.fromtimestamp(min(group_ts), tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+            last_seen  = datetime.fromtimestamp(max(group_ts), tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        else:
+            first_seen = last_seen = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
         db.execute(
-            'INSERT INTO vehicle_tracks (id, job_id, first_camera_id, last_camera_id) '
-            'VALUES (?, ?, ?, ?)',
-            (track_id, job_id, first_cam, last_cam)
+            'INSERT INTO vehicle_tracks (id, job_id, first_camera_id, last_camera_id, first_seen, last_seen) '
+            'VALUES (?, ?, ?, ?, ?, ?)',
+            (track_id, job_id, first_cam, last_cam, first_seen, last_seen)
         )
         for i in indices:
             db.execute(
