@@ -7,7 +7,6 @@ from flask import current_app
 from ultralytics import YOLO
 from torchvision import transforms
 from torchvision.models import resnet50, ResNet50_Weights
-from PIL import Image
 
 # Global model instances (loaded once at startup)
 _models_cache = {
@@ -24,41 +23,9 @@ MODEL_CONFIG = {
     'MATCH_THRESHOLD_PERCENT': 40,
     'YOLO_IMGSZ': 640,
     'YOLO_CONF': 0.25,
-    'REID_INPUT_SIZE': (224, 224),  # was (256, 128)
+    'REID_INPUT_SIZE': (256, 128),
     'VEHICLE_CLASSES': [2, 5, 7],  # car, bus, truck
 }
-
-
-
-class LetterboxResize:
-    """
-    Resizes a PIL image or numpy array to target_size (H, W) while preserving
-    aspect ratio. Pads remaining space with grey (128, 128, 128).
-    """
-    def __init__(self, target_size=(224, 224), fill_color=(128, 128, 128)):
-        self.target_size = target_size  # (H, W)
-        self.fill_color = fill_color
-
-    def __call__(self, img):
-        # Accept numpy array or PIL Image
-        if not isinstance(img, Image.Image):
-            img = Image.fromarray(img)
-
-        target_h, target_w = self.target_size
-        orig_w, orig_h = img.size  # PIL gives (W, H)
-
-        scale = min(target_w / orig_w, target_h / orig_h)
-        new_w = int(orig_w * scale)
-        new_h = int(orig_h * scale)
-
-        img_resized = img.resize((new_w, new_h), Image.BILINEAR)
-
-        canvas = Image.new('RGB', (target_w, target_h), self.fill_color)
-        pad_x = (target_w - new_w) // 2
-        pad_y = (target_h - new_h) // 2
-        canvas.paste(img_resized, (pad_x, pad_y))
-
-        return canvas
 
 
 def get_device():
@@ -150,7 +117,8 @@ def load_models():
     
     # Set up transforms for ReID model
     _models_cache['transform'] = transforms.Compose([
-        LetterboxResize(MODEL_CONFIG['REID_INPUT_SIZE']),
+        transforms.ToPILImage(),
+        transforms.Resize(MODEL_CONFIG['REID_INPUT_SIZE']),
         transforms.ToTensor(),
         transforms.Normalize(
             mean=[0.485, 0.456, 0.406],

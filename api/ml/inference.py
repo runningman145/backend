@@ -54,49 +54,6 @@ def extract_embedding(image, model, transform_func, device):
     return embedding
 
 
-def tta_extract_embedding(image_rgb, model, transform_func, device):
-    """
-    Extract a TTA-averaged ReID embedding from a single RGB image.
-
-    Generates four augmented views (original, horizontal flip, 90 % centre
-    crop resized back, and flip of that crop), runs them in a single batched
-    forward pass, then returns the L2-normalised mean embedding.
-
-    Args:
-        image_rgb:     numpy array (H, W, 3), RGB uint8
-        model:         ReID model instance
-        transform_func: torchvision transforms pipeline
-        device:        torch device
-
-    Returns:
-        L2-normalised mean embedding (numpy float32 array)
-    """
-    h, w = image_rgb.shape[:2]
-
-    # View 1 — original
-    v1 = image_rgb
-
-    # View 2 — horizontal flip
-    v2 = cv2.flip(image_rgb, 1)
-
-    # View 3 — 90 % centre crop, resized back to original dimensions
-    cy, cx = h // 2, w // 2
-    ch, cw = max(1, int(h * 0.9)), max(1, int(w * 0.9))
-    y0, x0 = cy - ch // 2, cx - cw // 2
-    crop = image_rgb[y0:y0 + ch, x0:x0 + cw]
-    v3 = cv2.resize(crop, (w, h), interpolation=cv2.INTER_LINEAR)
-
-    # View 4 — horizontal flip of the centre crop
-    v4 = cv2.flip(v3, 1)
-
-    # Single batched forward pass for all four views
-    per_view = batch_extract_embeddings([v1, v2, v3, v4], model, transform_func, device)
-
-    # Average and re-normalise
-    mean_emb = np.mean(per_view, axis=0)
-    mean_emb = mean_emb / np.linalg.norm(mean_emb)
-    return mean_emb
-
 
 def process_video_data(video_data, yolo_model, reid_model, transform_func, device,
                        query_embedding, threshold, frame_skip, detection_id=None, camera_id=None,
@@ -515,7 +472,7 @@ def process_image_for_matching(image_bytes, yolo_model, reid_model, transform_fu
         vehicle_crop_rgb = cv2.cvtColor(vehicle_crop, cv2.COLOR_BGR2RGB)
         
         # Extract embedding
-        embedding = tta_extract_embedding(vehicle_crop_rgb, reid_model, transform_func, device)
+        embedding = extract_embedding(vehicle_crop_rgb, reid_model, transform_func, device)
         
         vehicles.append({
             'box': {'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2},
